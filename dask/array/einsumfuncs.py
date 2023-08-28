@@ -1,8 +1,9 @@
-import numpy as np
-from numpy.compat import basestring
+from __future__ import annotations
 
-from .core import blockwise, asarray, einsum_lookup
-from ..utils import derived_from
+import numpy as np
+
+from dask.array.core import asarray, blockwise, einsum_lookup
+from dask.utils import derived_from
 
 einsum_symbols = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 einsum_symbols_set = set(einsum_symbols)
@@ -51,7 +52,7 @@ def parse_einsum_input(operands):
     if len(operands) == 0:
         raise ValueError("No input operands")
 
-    if isinstance(operands[0], basestring):
+    if isinstance(operands[0], str):
         subscripts = operands[0].replace(" ", "")
         operands = [asarray(o) for o in operands[1:]]
 
@@ -66,7 +67,7 @@ def parse_einsum_input(operands):
         tmp_operands = list(operands)
         operand_list = []
         subscript_list = []
-        for p in range(len(operands) // 2):
+        for _ in range(len(operands) // 2):
             operand_list.append(tmp_operands.pop(0))
             subscript_list.append(tmp_operands.pop(0))
 
@@ -194,10 +195,14 @@ def parse_einsum_input(operands):
 
 
 @derived_from(np)
-def einsum(*operands, **kwargs):
-    dtype = kwargs.pop("dtype", None)
-    optimize = kwargs.pop("optimize", False)
-    split_every = kwargs.pop("split_every", None)
+def einsum(*operands, dtype=None, optimize=False, split_every=None, **kwargs):
+    """Dask added an additional keyword-only argument ``split_every``.
+
+    split_every: int >= 2 or dict(axis: int), optional
+        Determines the depth of the recursive aggregation.
+        Deafults to ``None`` which would let dask heuristically
+        decide a good default.
+    """
 
     einsum_dtype = dtype
 
@@ -218,7 +223,7 @@ def einsum(*operands, **kwargs):
     inputs = [tuple(i) for i in inputs.split(",")]
 
     # Set of all indices
-    all_inds = set(a for i in inputs for a in i)
+    all_inds = {a for i in inputs for a in i}
 
     # Which indices are contracted?
     contract_inds = all_inds - set(outputs)
@@ -238,7 +243,7 @@ def einsum(*operands, **kwargs):
         kernel_dtype=einsum_dtype,
         ncontract_inds=ncontract_inds,
         optimize=optimize,
-        **kwargs
+        **kwargs,
     )
 
     # Now reduce over any extra contraction dimensions

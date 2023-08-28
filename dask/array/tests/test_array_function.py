@@ -1,38 +1,43 @@
-import pytest
+from __future__ import annotations
+
 import numpy as np
+import pytest
 
 import dask.array as da
-from dask.array.utils import assert_eq, IS_NEP18_ACTIVE
-
-missing_arrfunc_cond = not IS_NEP18_ACTIVE
-missing_arrfunc_reason = "NEP-18 support is not available in NumPy"
+from dask.array.tests.test_dispatch import EncapsulateNDArray, WrappedArray
+from dask.array.utils import assert_eq
 
 
-@pytest.mark.skipif(missing_arrfunc_cond, reason=missing_arrfunc_reason)
 @pytest.mark.parametrize(
     "func",
     [
+        lambda x: np.append(x, x),
         lambda x: np.concatenate([x, x, x]),
         lambda x: np.cov(x, x),
         lambda x: np.dot(x, x),
-        lambda x: np.dstack(x),
+        lambda x: np.dstack((x, x)),
         lambda x: np.flip(x, axis=0),
-        lambda x: np.hstack(x),
+        lambda x: np.hstack((x, x)),
         lambda x: np.matmul(x, x),
         lambda x: np.mean(x),
         lambda x: np.stack([x, x]),
         lambda x: np.block([x, x]),
         lambda x: np.sum(x),
         lambda x: np.var(x),
-        lambda x: np.vstack(x),
+        lambda x: np.vstack((x, x)),
         lambda x: np.linalg.norm(x),
         lambda x: np.min(x),
         lambda x: np.amin(x),
         lambda x: np.round(x),
+        lambda x: np.insert(x, 0, 3, axis=0),
+        lambda x: np.delete(x, 0, axis=0),
+        lambda x: np.select(
+            [x < 0.3, x < 0.6, x > 0.7], [x * 2, x, x / 2], default=0.65
+        ),
     ],
 )
 def test_array_function_dask(func):
-    x = np.random.random((100, 100))
+    x = np.random.default_rng().random((100, 100))
     y = da.from_array(x, chunks=(50, 50))
     res_x = func(x)
     res_y = func(y)
@@ -41,10 +46,27 @@ def test_array_function_dask(func):
     assert_eq(res_y, res_x)
 
 
-@pytest.mark.skipif(missing_arrfunc_cond, reason=missing_arrfunc_reason)
+@pytest.mark.parametrize(
+    "func",
+    [
+        lambda x: np.dstack(x),
+        lambda x: np.hstack(x),
+        lambda x: np.vstack(x),
+    ],
+)
+def test_stack_functions_require_sequence_of_arrays(func):
+    x = np.random.default_rng().random((100, 100))
+    y = da.from_array(x, chunks=(50, 50))
+
+    with pytest.raises(
+        NotImplementedError, match="expects a sequence of arrays as the first argument"
+    ):
+        func(y)
+
+
 @pytest.mark.parametrize("func", [np.fft.fft, np.fft.fft2])
 def test_array_function_fft(func):
-    x = np.random.random((100, 100))
+    x = np.random.default_rng().random((100, 100))
     y = da.from_array(x, chunks=(100, 100))
     res_x = func(x)
     res_y = func(y)
@@ -54,18 +76,16 @@ def test_array_function_fft(func):
     assert_eq(res_y, res_x)
 
 
-@pytest.mark.skipif(missing_arrfunc_cond, reason=missing_arrfunc_reason)
 @pytest.mark.parametrize(
     "func",
     [
         lambda x: np.min_scalar_type(x),
         lambda x: np.linalg.det(x),
         lambda x: np.linalg.eigvals(x),
-        lambda x: np.median(x),
     ],
 )
 def test_array_notimpl_function_dask(func):
-    x = np.random.random((100, 100))
+    x = np.random.default_rng().random((100, 100))
     y = da.from_array(x, chunks=(50, 50))
 
     with pytest.warns(
@@ -74,13 +94,12 @@ def test_array_notimpl_function_dask(func):
         func(y)
 
 
-@pytest.mark.skipif(missing_arrfunc_cond, reason=missing_arrfunc_reason)
 @pytest.mark.parametrize(
     "func", [lambda x: np.real(x), lambda x: np.imag(x), lambda x: np.transpose(x)]
 )
 def test_array_function_sparse(func):
     sparse = pytest.importorskip("sparse")
-    x = da.random.random((500, 500), chunks=(100, 100))
+    x = da.random.default_rng().random((500, 500), chunks=(100, 100))
     x[x < 0.9] = 0
 
     y = x.map_blocks(sparse.COO)
@@ -88,12 +107,12 @@ def test_array_function_sparse(func):
     assert_eq(func(x), func(y))
 
 
-@pytest.mark.skipif(missing_arrfunc_cond, reason=missing_arrfunc_reason)
 def test_array_function_sparse_tensordot():
     sparse = pytest.importorskip("sparse")
-    x = np.random.random((2, 3, 4))
+    rng = np.random.default_rng()
+    x = rng.random((2, 3, 4))
     x[x < 0.9] = 0
-    y = np.random.random((4, 3, 2))
+    y = rng.random((4, 3, 2))
     y[y < 0.9] = 0
 
     xx = sparse.COO(x)
@@ -104,12 +123,12 @@ def test_array_function_sparse_tensordot():
     )
 
 
-@pytest.mark.skipif(missing_arrfunc_cond, reason=missing_arrfunc_reason)
-def test_array_function_cupy_svd():
+@pytest.mark.parametrize("chunks", [(100, 100), (500, 100)])
+def test_array_function_cupy_svd(chunks):
     cupy = pytest.importorskip("cupy")
-    x = cupy.random.random((500, 100))
+    x = cupy.random.default_rng().random((500, 100))
 
-    y = da.from_array(x, chunks=(100, 100), asarray=False)
+    y = da.from_array(x, chunks=chunks, asarray=False)
 
     u_base, s_base, v_base = da.linalg.svd(y)
     u, s, v = np.linalg.svd(y)
@@ -119,100 +138,33 @@ def test_array_function_cupy_svd():
     assert_eq(v, v_base)
 
 
-@pytest.mark.skipif(missing_arrfunc_cond, reason=missing_arrfunc_reason)
 @pytest.mark.parametrize(
     "func",
     [
         lambda x: np.concatenate([x, x, x]),
         lambda x: np.cov(x, x),
         lambda x: np.dot(x, x),
-        lambda x: np.dstack(x),
+        lambda x: np.dstack((x, x)),
         lambda x: np.flip(x, axis=0),
-        lambda x: np.hstack(x),
+        lambda x: np.hstack((x, x)),
         lambda x: np.matmul(x, x),
         lambda x: np.mean(x),
         lambda x: np.stack([x, x]),
         lambda x: np.sum(x),
         lambda x: np.var(x),
-        lambda x: np.vstack(x),
+        lambda x: np.vstack((x, x)),
         lambda x: np.linalg.norm(x),
     ],
 )
 def test_unregistered_func(func):
-    def wrap(func_name):
-        """
-        Wrap a function.
-        """
-
-        def wrapped(self, *a, **kw):
-            a = getattr(self.arr, func_name)(*a, **kw)
-            return a if not isinstance(a, np.ndarray) else type(self)(a)
-
-        return wrapped
-
-    def dispatch_property(prop_name):
-        """
-        Wrap a simple property.
-        """
-
-        @property
-        def wrapped(self, *a, **kw):
-            return getattr(self.arr, prop_name)
-
-        return wrapped
-
-    class EncapsulateNDArray(np.lib.mixins.NDArrayOperatorsMixin):
-        """
-        A class that "mocks" ndarray by encapsulating an ndarray and using
-        protocols to "look like" an ndarray. Basically tests whether Dask
-        works fine with something that is essentially an array but uses
-        protocols instead of being an actual array.
-        """
-
-        __array_priority__ = 20
-
-        def __init__(self, arr):
-            self.arr = arr
-
-        def __array__(self, *args, **kwargs):
-            return np.asarray(self.arr, *args, **kwargs)
-
-        def __array_function__(self, f, t, arrs, kw):
-            arrs = tuple(
-                arr if not isinstance(arr, type(self)) else arr.arr for arr in arrs
-            )
-            t = tuple(ti for ti in t if not issubclass(ti, type(self)))
-            print(t)
-            a = self.arr.__array_function__(f, t, arrs, kw)
-            return a if not isinstance(a, np.ndarray) else type(self)(a)
-
-        __getitem__ = wrap("__getitem__")
-
-        __setitem__ = wrap("__setitem__")
-
-        def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-            inputs = tuple(
-                i if not isinstance(i, type(self)) else i.arr for i in inputs
-            )
-            a = getattr(ufunc, method)(*inputs, **kwargs)
-            return a if not isinstance(a, np.ndarray) else type(self)(a)
-
-        shape = dispatch_property("shape")
-        ndim = dispatch_property("ndim")
-        dtype = dispatch_property("dtype")
-
-        astype = wrap("astype")
-        sum = wrap("sum")
-        prod = wrap("prod")
-
     # Wrap a procol-based encapsulated ndarray
-    x = EncapsulateNDArray(np.random.random((100, 100)))
+    x = EncapsulateNDArray(np.random.default_rng().random((100, 100)))
 
     # See if Dask holds the array fine
     y = da.from_array(x, chunks=(50, 50))
 
     # Check if it's an equivalent array
-    assert_eq(x, y, check_meta=False)
+    assert_eq(x, y, check_meta=False, check_type=False)
 
     # Perform two NumPy functions, one on the
     # Encapsulated array
@@ -223,18 +175,64 @@ def test_unregistered_func(func):
     yy = func(y)
 
     # Check that they are equivalent arrays.
-    assert_eq(xx, yy, check_meta=False)
+    assert_eq(xx, yy, check_meta=False, check_type=False)
 
 
-def test_median_func():
+def test_non_existent_func():
     # Regression test for __array_function__ becoming default in numpy 1.17
-    # dask has no median function, so ensure that this still calls np.median
-    image = da.from_array(np.array([[0, 1], [1, 2]]), chunks=(1, 2))
-    if IS_NEP18_ACTIVE:
-        with pytest.warns(
-            FutureWarning,
-            match="The `numpy.median` function is not implemented by Dask",
-        ):
-            assert int(np.median(image)) == 1
-    else:
-        assert int(np.median(image)) == 1
+    # dask has no sort function, so ensure that this still calls np.sort
+    x = da.from_array(np.array([1, 2, 4, 3]), chunks=(2,))
+    with pytest.warns(
+        FutureWarning, match="The `numpy.sort` function is not implemented by Dask"
+    ):
+        assert list(np.sort(x)) == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        np.equal,
+        np.matmul,
+        np.dot,
+        lambda x, y: np.stack([x, y]),
+    ],
+)
+@pytest.mark.parametrize(
+    "arr_upcast, arr_downcast",
+    [
+        (
+            WrappedArray(np.random.default_rng().random((10, 10))),
+            da.random.default_rng().random((10, 10), chunks=(5, 5)),
+        ),
+        (
+            da.random.default_rng().random((10, 10), chunks=(5, 5)),
+            EncapsulateNDArray(np.random.default_rng().random((10, 10))),
+        ),
+        (
+            WrappedArray(np.random.default_rng().random((10, 10))),
+            EncapsulateNDArray(np.random.default_rng().random((10, 10))),
+        ),
+    ],
+)
+def test_binary_function_type_precedence(func, arr_upcast, arr_downcast):
+    """Test proper dispatch on binary NumPy functions"""
+    assert (
+        type(func(arr_upcast, arr_downcast))
+        == type(func(arr_downcast, arr_upcast))
+        == type(arr_upcast)
+    )
+
+
+@pytest.mark.parametrize("func", [da.array, da.asarray, da.asanyarray, da.tri])
+def test_like_raises(func):
+    assert_eq(func(1, like=func(1)), func(1))
+
+
+@pytest.mark.parametrize("func", [np.array, np.asarray, np.asanyarray])
+def test_like_with_numpy_func(func):
+    assert_eq(func(1, like=da.array(1)), func(1))
+
+
+@pytest.mark.parametrize("func", [np.array, np.asarray, np.asanyarray])
+def test_like_with_numpy_func_and_dtype(func):
+    assert_eq(func(1, dtype=float, like=da.array(1)), func(1, dtype=float))

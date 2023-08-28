@@ -1,17 +1,27 @@
+from __future__ import annotations
+
 import operator
+import warnings
+from functools import partial
 from numbers import Number
 
 import numpy as np
-import toolz
+import tlz as toolz
 
-from ..base import tokenize, wait
-from ..blockwise import blockwise
-from ..highlevelgraph import HighLevelGraph
-from ..utils import derived_from, apply
-from .core import dotmany, Array, concatenate
-from .creation import eye
-from .random import RandomState
-from .utils import meta_from_array
+from dask.array.core import Array, concatenate, dotmany, from_delayed
+from dask.array.creation import eye
+from dask.array.random import RandomState, default_rng
+from dask.array.utils import (
+    array_safe,
+    meta_from_array,
+    solve_triangular_safe,
+    svd_flip,
+)
+from dask.base import tokenize, wait
+from dask.blockwise import blockwise
+from dask.delayed import delayed
+from dask.highlevelgraph import HighLevelGraph
+from dask.utils import apply, derived_from
 
 
 def _cumsum_blocks(it):
@@ -42,13 +52,13 @@ def _wrapped_qr(a):
     """
     # workaround may be removed when numpy stops rejecting edge cases
     if a.shape[0] == 0:
-        return np.zeros((0, 0)), np.zeros((0, a.shape[1]))
+        return np.zeros_like(a, shape=(0, 0)), np.zeros_like(a, shape=(0, a.shape[1]))
     else:
         return np.linalg.qr(a)
 
 
 def tsqr(data, compute_svd=False, _max_vchunk_size=None):
-    """ Direct Tall-and-Skinny QR algorithm
+    """Direct Tall-and-Skinny QR algorithm
 
     As presented in:
 
@@ -96,9 +106,12 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
 
     See Also
     --------
-    dask.array.linalg.qr - Powered by this algorithm
-    dask.array.linalg.svd - Powered by this algorithm
-    dask.array.linalg.sfqr - Variant for short-and-fat arrays
+    dask.array.linalg.qr
+        Powered by this algorithm
+    dask.array.linalg.svd
+        Powered by this algorithm
+    dask.array.linalg.sfqr
+        Variant for short-and-fat arrays
     """
     nr, nc = len(data.chunks[0]), len(data.chunks[1])
     cr_max, cc = max(data.chunks[0]), data.chunks[1][0]
@@ -109,7 +122,7 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
             "  1. Have two dimensions\n"
             "  2. Have only one column of blocks\n\n"
             "Note: This function (tsqr) supports QR decomposition in the case of\n"
-            "tall-and-skinny matrices (single column chunk/block; see qr)"
+            "tall-and-skinny matrices (single column chunk/block; see qr)\n"
             "Current shape: {},\nCurrent chunksize: {}".format(
                 data.shape, data.chunksize
             )
@@ -136,23 +149,23 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
         numblocks={data.name: numblocks},
     )
     layers[name_qr_st1] = dsk_qr_st1
-    dependencies[name_qr_st1] = data.__dask_layers__()
+    dependencies[name_qr_st1] = set(data.__dask_layers__())
 
     # Block qr[0]
     name_q_st1 = "getitem" + token + "-q1"
-    dsk_q_st1 = dict(
-        ((name_q_st1, i, 0), (operator.getitem, (name_qr_st1, i, 0), 0))
+    dsk_q_st1 = {
+        (name_q_st1, i, 0): (operator.getitem, (name_qr_st1, i, 0), 0)
         for i in range(numblocks[0])
-    )
+    }
     layers[name_q_st1] = dsk_q_st1
     dependencies[name_q_st1] = {name_qr_st1}
 
     # Block qr[1]
     name_r_st1 = "getitem" + token + "-r1"
-    dsk_r_st1 = dict(
-        ((name_r_st1, i, 0), (operator.getitem, (name_qr_st1, i, 0), 1))
+    dsk_r_st1 = {
+        (name_r_st1, i, 0): (operator.getitem, (name_qr_st1, i, 0), 1)
         for i in range(numblocks[0])
-    )
+    }
     layers[name_r_st1] = dsk_r_st1
     dependencies[name_r_st1] = {name_qr_st1}
 
@@ -192,22 +205,19 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
 
         # R_stacked
         name_r_stacked = "stack" + token + "-r1"
-        dsk_r_stacked = dict(
-            (
-                (name_r_stacked, i, 0),
-                (
-                    np.vstack,
-                    (tuple, [(name_r_st1, idx, 0) for idx, _ in sub_block_info]),
-                ),
+        dsk_r_stacked = {
+            (name_r_stacked, i, 0): (
+                np.vstack,
+                (tuple, [(name_r_st1, idx, 0) for idx, _ in sub_block_info]),
             )
             for i, sub_block_info in enumerate(all_blocks)
-        )
+        }
         layers[name_r_stacked] = dsk_r_stacked
         dependencies[name_r_stacked] = {name_r_st1}
 
         # retrieve R_stacked for recursion with tsqr
         vchunks_rstacked = tuple(
-            [sum(map(lambda x: x[1], sub_block_info)) for sub_block_info in all_blocks]
+            sum(map(lambda x: x[1], sub_block_info)) for sub_block_info in all_blocks
         )
         graph = HighLevelGraph(layers, dependencies)
         # dsk.dependencies[name_r_stacked] = {data.name}
@@ -218,7 +228,7 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
             graph,
             name_r_stacked,
             shape=(sum(vchunks_rstacked), n),
-            chunks=(vchunks_rstacked, (n)),
+            chunks=(vchunks_rstacked, n),
             meta=r_stacked_meta,
         )
 
@@ -229,29 +239,26 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
 
         # Q_inner: "unstack"
         name_q_st2 = "getitem" + token + "-q2"
-        dsk_q_st2 = dict(
-            (
-                (name_q_st2, j, 0),
-                (
-                    operator.getitem,
-                    (q_inner.name, i, 0),
-                    ((slice(e[0], e[1])), (slice(0, n))),
-                ),
+        dsk_q_st2 = {
+            (name_q_st2, j, 0): (
+                operator.getitem,
+                (q_inner.name, i, 0),
+                ((slice(e[0], e[1])), (slice(0, n))),
             )
             for i, sub_block_info in enumerate(all_blocks)
             for j, e in zip(
                 [x[0] for x in sub_block_info],
                 _cumsum_blocks([x[1] for x in sub_block_info]),
             )
-        )
+        }
         layers[name_q_st2] = dsk_q_st2
-        dependencies[name_q_st2] = q_inner.__dask_layers__()
+        dependencies[name_q_st2] = set(q_inner.__dask_layers__())
 
         # R: R_inner
         name_r_st2 = "r-inner" + token
         dsk_r_st2 = {(name_r_st2, 0, 0): (r_inner.name, 0, 0)}
         layers[name_r_st2] = dsk_r_st2
-        dependencies[name_r_st2] = r_inner.__dask_layers__()
+        dependencies[name_r_st2] = set(r_inner.__dask_layers__())
 
         # Q: Block qr[0] (*) Q_inner
         name_q_st3 = "dot" + token + "-q3"
@@ -298,7 +305,8 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
         layers[name_q_st2_aux] = dsk_q_st2_aux
         dependencies[name_q_st2_aux] = {name_qr_st2}
 
-        if not any(np.isnan(c) for cs in data.chunks for c in cs):
+        chucks_are_all_known = not any(np.isnan(c) for cs in data.chunks for c in cs)
+        if chucks_are_all_known:
             # when chunks are all known...
             # obtain slices on q from in-core compute (e.g.: (slice(10, 20), slice(0, 5)))
             q2_block_sizes = [min(e, n) for e in data.chunks[0]]
@@ -324,12 +332,13 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
             # cumulative sums (start, end)
             name_q2cs = "cumsum" + token + "-q2"
             dsk_q2_cumsum = {(name_q2cs, 0): [0, (name_q2bs, 0)]}
-            dsk_q2_cumsum.update(
-                {
-                    (name_q2cs, i): (_cumsum_part, (name_q2cs, i - 1), (name_q2bs, i))
-                    for i in range(1, numblocks[0])
-                }
-            )
+
+            for i in range(1, numblocks[0]):
+                dsk_q2_cumsum[(name_q2cs, i)] = (
+                    _cumsum_part,
+                    (name_q2cs, i - 1),
+                    (name_q2bs, i),
+                )
 
             # obtain slices on q from in-core compute (e.g.: (slice(10, 20), slice(0, 5)))
             name_blockslice = "slice" + token + "-q"
@@ -345,7 +354,7 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
                 dsk_n, dsk_q2_shapes, dsk_q2_cumsum, dsk_block_slices
             )
 
-            deps = {data.name, name_q2bs, name_q2cs}
+            deps = {data.name}
             block_slices = [(name_blockslice, i) for i in range(numblocks[0])]
 
         layers["q-blocksizes" + token] = dsk_q_blockslices
@@ -353,12 +362,15 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
 
         # In-core qr[0] unstacking
         name_q_st2 = "getitem" + token + "-q2"
-        dsk_q_st2 = dict(
-            ((name_q_st2, i, 0), (operator.getitem, (name_q_st2_aux, 0, 0), b))
+        dsk_q_st2 = {
+            (name_q_st2, i, 0): (operator.getitem, (name_q_st2_aux, 0, 0), b)
             for i, b in enumerate(block_slices)
-        )
+        }
         layers[name_q_st2] = dsk_q_st2
-        dependencies[name_q_st2] = {name_q_st2_aux, "q-blocksizes" + token}
+        if chucks_are_all_known:
+            dependencies[name_q_st2] = {name_q_st2_aux}
+        else:
+            dependencies[name_q_st2] = {name_q_st2_aux, "q-blocksizes" + token}
 
         # Q: Block qr[0] (*) In-core qr[0]
         name_q_st3 = "dot" + token + "-q3"
@@ -502,7 +514,7 @@ def tsqr(data, compute_svd=False, _max_vchunk_size=None):
 
 
 def sfqr(data, name=None):
-    """ Direct Short-and-Fat QR
+    """Direct Short-and-Fat QR
 
     Currently, this is a quick hack for non-tall-and-skinny matrices which
     are one chunk tall and (unless they are one chunk wide) have chunks
@@ -519,8 +531,10 @@ def sfqr(data, name=None):
 
     See Also
     --------
-    dask.array.linalg.qr - Main user API that uses this function
-    dask.array.linalg.tsqr - Variant for tall-and-skinny case
+    dask.array.linalg.qr
+        Main user API that uses this function
+    dask.array.linalg.tsqr
+        Variant for tall-and-skinny case
     """
     nr, nc = len(data.chunks[0]), len(data.chunks[1])
     cr, cc = data.chunks[0][0], data.chunks[1][0]
@@ -559,11 +573,14 @@ def sfqr(data, name=None):
     name_A_1 = prefix + "A_1"
     name_A_rest = prefix + "A_rest"
     layers[name_A_1] = {(name_A_1, 0, 0): (data.name, 0, 0)}
-    dependencies[name_A_1] = data.__dask_layers__()
+    dependencies[name_A_1] = set(data.__dask_layers__())
     layers[name_A_rest] = {
         (name_A_rest, 0, idx): (data.name, 0, 1 + idx) for idx in range(nc - 1)
     }
-    dependencies[name_A_rest] = data.__dask_layers__()
+    if len(layers[name_A_rest]) > 0:
+        dependencies[name_A_rest] = set(data.__dask_layers__())
+    else:
+        dependencies[name_A_rest] = set()
 
     # Q R_1 = A_1
     name_Q_R1 = prefix + "Q_R_1"
@@ -594,7 +611,7 @@ def sfqr(data, name=None):
             graph,
             name_A_rest,
             shape=(min(m, n), n - cc),
-            chunks=((cr), data.chunks[1][1:]),
+            chunks=(cr, data.chunks[1][1:]),
             meta=A_rest_meta,
         )
         Rs.append(Q.T.dot(A_rest))
@@ -604,27 +621,49 @@ def sfqr(data, name=None):
     return Q, R
 
 
-def compression_level(n, q, oversampling=10, min_subspace_size=20):
-    """ Compression level to use in svd_compressed
+def compression_level(n, q, n_oversamples=10, min_subspace_size=20):
+    """Compression level to use in svd_compressed
 
     Given the size ``n`` of a space, compress that that to one of size
-    ``q`` plus oversampling.
+    ``q`` plus n_oversamples.
 
     The oversampling allows for greater flexibility in finding an
     appropriate subspace, a low value is often enough (10 is already a
     very conservative choice, it can be further reduced).
     ``q + oversampling`` should not be larger than ``n``.  In this
-    specific implementation, ``q + oversampling`` is at least
+    specific implementation, ``q + n_oversamples`` is at least
     ``min_subspace_size``.
 
+    Parameters
+    ----------
+    n: int
+        Column/row dimension of original matrix
+    q: int
+        Size of the desired subspace (the actual size will be bigger,
+        because of oversampling, see ``da.linalg.compression_level``)
+    n_oversamples: int, default=10
+        Number of oversamples used for generating the sampling matrix.
+    min_subspace_size : int, default=20
+        Minimum subspace size.
+
+     Examples
+    --------
     >>> compression_level(100, 10)
     20
     """
-    return min(max(min_subspace_size, q + oversampling), n)
+    return min(max(min_subspace_size, q + n_oversamples), n)
 
 
-def compression_matrix(data, q, n_power_iter=0, seed=None, compute=False):
-    """ Randomly sample matrix to find most active subspace
+def compression_matrix(
+    data,
+    q,
+    iterator="power",
+    n_power_iter=0,
+    n_oversamples=10,
+    seed=None,
+    compute=False,
+):
+    """Randomly sample matrix to find most active subspace
 
     This compression matrix returned by this algorithm can be used to
     compute both the QR decomposition and the Singular Value
@@ -636,9 +675,18 @@ def compression_matrix(data, q, n_power_iter=0, seed=None, compute=False):
     q: int
         Size of the desired subspace (the actual size will be bigger,
         because of oversampling, see ``da.linalg.compression_level``)
+    iterator: {'power', 'QR'}, default='power'
+        Define the technique used for iterations to cope with flat
+        singular spectra or when the input matrix is very large.
     n_power_iter: int
-        number of power iterations, useful when the singular values of
-        the input matrix decay very slowly.
+        Number of power iterations, useful when the singular values
+        decay slowly. Error decreases exponentially as `n_power_iter`
+        increases. In practice, set `n_power_iter` <= 4.
+    n_oversamples: int, default=10
+        Number of oversamples used for generating the sampling matrix.
+        This value increases the size of the subspace computed, which is more
+        accurate at the cost of efficiency.  Results are rarely sensitive to this choice
+        though and in practice a value of 10 is very commonly high enough.
     compute : bool
         Whether or not to compute data at each use.
         Recomputing the input while performing several passes reduces memory
@@ -655,31 +703,59 @@ def compression_matrix(data, q, n_power_iter=0, seed=None, compute=False):
     pp. 217-288, June 2011
     https://arxiv.org/abs/0909.4061
     """
-    n = data.shape[1]
-    comp_level = compression_level(n, q)
+    if iterator not in ["power", "QR"]:
+        raise ValueError(
+            f"Iterator '{iterator}' not valid, must one one of ['power', 'QR']"
+        )
+    m, n = data.shape
+    comp_level = compression_level(min(m, n), q, n_oversamples=n_oversamples)
     if isinstance(seed, RandomState):
         state = seed
     else:
-        state = RandomState(seed)
+        state = default_rng(seed)
+    datatype = np.float64
+    if (data.dtype).type in {np.float32, np.complex64}:
+        datatype = np.float32
     omega = state.standard_normal(
         size=(n, comp_level), chunks=(data.chunks[1], (comp_level,))
-    )
+    ).astype(datatype, copy=False)
     mat_h = data.dot(omega)
-    for j in range(n_power_iter):
-        if compute:
-            mat_h = mat_h.persist()
-            wait(mat_h)
-        tmp = data.T.dot(mat_h)
-        if compute:
-            tmp = tmp.persist()
-            wait(tmp)
-        mat_h = data.dot(tmp)
-    q, _ = tsqr(mat_h)
+    if iterator == "power":
+        for _ in range(n_power_iter):
+            if compute:
+                mat_h = mat_h.persist()
+                wait(mat_h)
+            tmp = data.T.dot(mat_h)
+            if compute:
+                tmp = tmp.persist()
+                wait(tmp)
+            mat_h = data.dot(tmp)
+        q, _ = tsqr(mat_h)
+    else:
+        q, _ = tsqr(mat_h)
+        for _ in range(n_power_iter):
+            if compute:
+                q = q.persist()
+                wait(q)
+            q, _ = tsqr(data.T.dot(q))
+            if compute:
+                q = q.persist()
+                wait(q)
+            q, _ = tsqr(data.dot(q))
     return q.T
 
 
-def svd_compressed(a, k, n_power_iter=0, seed=None, compute=False):
-    """ Randomly compressed rank-k thin Singular Value Decomposition.
+def svd_compressed(
+    a,
+    k,
+    iterator="power",
+    n_power_iter=0,
+    n_oversamples=10,
+    seed=None,
+    compute=False,
+    coerce_signs=True,
+):
+    """Randomly compressed rank-k thin Singular Value Decomposition.
 
     This computes the approximate singular value decomposition of a large
     array.  This algorithm is generally faster than the normal algorithm
@@ -692,20 +768,32 @@ def svd_compressed(a, k, n_power_iter=0, seed=None, compute=False):
         Input array
     k: int
         Rank of the desired thin SVD decomposition.
-    n_power_iter: int
+    iterator: {'power', 'QR'}, default='power'
+        Define the technique used for iterations to cope with flat
+        singular spectra or when the input matrix is very large.
+    n_power_iter: int, default=0
         Number of power iterations, useful when the singular values
-        decay slowly. Error decreases exponentially as n_power_iter
-        increases. In practice, set n_power_iter <= 4.
+        decay slowly. Error decreases exponentially as `n_power_iter`
+        increases. In practice, set `n_power_iter` <= 4.
+    n_oversamples: int, default=10
+        Number of oversamples used for generating the sampling matrix.
+        This value increases the size of the subspace computed, which is more
+        accurate at the cost of efficiency.  Results are rarely sensitive to this choice
+        though and in practice a value of 10 is very commonly high enough.
     compute : bool
         Whether or not to compute data at each use.
         Recomputing the input while performing several passes reduces memory
         pressure, but means that we have to compute the input multiple times.
         This is a good choice if the data is larger than memory and cheap to
         recreate.
+    coerce_signs : bool
+        Whether or not to apply sign coercion to singular vectors in
+        order to maintain deterministic results, by default True.
+
 
     Examples
     --------
-    >>> u, s, vt = svd_compressed(x, 20)  # doctest: +SKIP
+    >>> u, s, v = svd_compressed(x, 20)  # doctest: +SKIP
 
     Returns
     -------
@@ -723,18 +811,26 @@ def svd_compressed(a, k, n_power_iter=0, seed=None, compute=False):
     https://arxiv.org/abs/0909.4061
     """
     comp = compression_matrix(
-        a, k, n_power_iter=n_power_iter, seed=seed, compute=compute
+        a,
+        k,
+        iterator=iterator,
+        n_power_iter=n_power_iter,
+        n_oversamples=n_oversamples,
+        seed=seed,
+        compute=compute,
     )
     if compute:
         comp = comp.persist()
         wait(comp)
     a_compressed = comp.dot(a)
     v, s, u = tsqr(a_compressed.T, compute_svd=True)
-    u = comp.T.dot(u)
+    u = comp.T.dot(u.T)
     v = v.T
     u = u[:, :k]
     s = s[:k]
     v = v[:k, :]
+    if coerce_signs:
+        u, v = svd_flip(u, v)
     return u, s, v
 
 
@@ -742,21 +838,22 @@ def qr(a):
     """
     Compute the qr factorization of a matrix.
 
-    Examples
-    --------
-
-    >>> q, r = da.linalg.qr(x)  # doctest: +SKIP
+    Parameters
+    ----------
+    a : Array
 
     Returns
     -------
-
     q:  Array, orthonormal
     r:  Array, upper-triangular
 
+    Examples
+    --------
+    >>> q, r = da.linalg.qr(x)  # doctest: +SKIP
+
     See Also
     --------
-
-    np.linalg.qr: Equivalent NumPy Operation
+    numpy.linalg.qr: Equivalent NumPy Operation
     dask.array.linalg.tsqr: Implementation for tall-and-skinny arrays
     dask.array.linalg.sfqr: Implementation for short-and-fat arrays
     """
@@ -776,9 +873,16 @@ def qr(a):
         )
 
 
-def svd(a):
+def svd(a, coerce_signs=True):
     """
     Compute the singular value decomposition of a matrix.
+
+    Parameters
+    ----------
+    a : (M, N) Array
+    coerce_signs : bool
+        Whether or not to apply sign coercion to singular vectors in
+        order to maintain deterministic results, by default True.
 
     Examples
     --------
@@ -788,23 +892,82 @@ def svd(a):
     Returns
     -------
 
-    u:  Array, unitary / orthogonal
-    s:  Array, singular values in decreasing order (largest first)
-    v:  Array, unitary / orthogonal
+    u : (M, K) Array, unitary / orthogonal
+        Left-singular vectors of `a` (in columns) with shape (M, K)
+        where K = min(M, N).
+    s : (K,) Array, singular values in decreasing order (largest first)
+        Singular values of `a`.
+    v : (K, N) Array, unitary / orthogonal
+        Right-singular vectors of `a` (in rows) with shape (K, N)
+        where K = min(M, N).
+
+    Warnings
+    --------
+
+    SVD is only supported for arrays with chunking in one dimension.
+    This requires that all inputs either contain a single column
+    of chunks (tall-and-skinny) or a single row of chunks (short-and-fat).
+    For arrays with chunking in both dimensions, see da.linalg.svd_compressed.
 
     See Also
     --------
 
     np.linalg.svd : Equivalent NumPy Operation
-    dask.array.linalg.tsqr: Implementation for tall-and-skinny arrays
+    da.linalg.svd_compressed : Randomized SVD for fully chunked arrays
+    dask.array.linalg.tsqr : QR factorization for tall-and-skinny arrays
+    dask.array.utils.svd_flip : Sign normalization for singular vectors
     """
-    return tsqr(a, compute_svd=True)
+    nb = a.numblocks
+    if a.ndim != 2:
+        raise ValueError(
+            "Array must be 2D.\n"
+            "Input shape: {}\n"
+            "Input ndim: {}\n".format(a.shape, a.ndim)
+        )
+    if nb[0] > 1 and nb[1] > 1:
+        raise NotImplementedError(
+            "Array must be chunked in one dimension only. "
+            "This function (svd) only supports tall-and-skinny or short-and-fat "
+            "matrices (see da.linalg.svd_compressed for SVD on fully chunked arrays).\n"
+            "Input shape: {}\n"
+            "Input numblocks: {}\n".format(a.shape, nb)
+        )
+
+    # Single-chunk case
+    if nb[0] == nb[1] == 1:
+        m, n = a.shape
+        k = min(a.shape)
+        mu, ms, mv = np.linalg.svd(
+            np.ones_like(a._meta, shape=(1, 1), dtype=a._meta.dtype)
+        )
+        u, s, v = delayed(np.linalg.svd, nout=3)(a, full_matrices=False)
+        u = from_delayed(u, shape=(m, k), meta=mu)
+        s = from_delayed(s, shape=(k,), meta=ms)
+        v = from_delayed(v, shape=(k, n), meta=mv)
+    # Multi-chunk cases
+    else:
+        # Tall-and-skinny case
+        if nb[0] > nb[1]:
+            u, s, v = tsqr(a, compute_svd=True)
+            truncate = a.shape[0] < a.shape[1]
+        # Short-and-fat case
+        else:
+            vt, s, ut = tsqr(a.T, compute_svd=True)
+            u, s, v = ut.T, s, vt.T
+            truncate = a.shape[0] > a.shape[1]
+        # Only when necessary, remove extra singular vectors if array
+        # has shape that contradicts chunking, e.g. the array is a
+        # column of chunks but still has more columns than rows overall
+        if truncate:
+            k = min(a.shape)
+            u, v = u[:, :k], v[:k, :]
+    if coerce_signs:
+        u, v = svd_flip(u, v)
+    return u, s, v
 
 
 def _solve_triangular_lower(a, b):
-    import scipy.linalg
-
-    return scipy.linalg.solve_triangular(a, b, lower=True)
+    return solve_triangular_safe(a, b, lower=True)
 
 
 def lu(a):
@@ -823,7 +986,6 @@ def lu(a):
     l:  Array, lower triangular matrix with unit diagonal.
     u:  Array, upper triangular matrix
     """
-
     import scipy.linalg
 
     if a.ndim != 2:
@@ -964,8 +1126,6 @@ def solve_triangular(a, b, lower=False):
         Solution to the system `a x = b`. Shape of return matches `b`.
     """
 
-    import scipy.linalg
-
     if a.ndim != 2:
         raise ValueError("a must be 2 dimensional")
     if b.ndim <= 2:
@@ -1026,24 +1186,28 @@ def solve_triangular(a, b, lower=False):
                         prevs.append(prev)
                     target = (operator.sub, target, (sum, prevs))
                 dsk[_key(i, j)] = (
-                    scipy.linalg.solve_triangular,
+                    solve_triangular_safe,
                     (a.name, i, i),
                     target,
                 )
 
     graph = HighLevelGraph.from_collections(name, dsk, dependencies=[a, b])
+
+    a_meta = meta_from_array(a)
+    b_meta = meta_from_array(b)
     res = _solve_triangular_lower(
-        np.array([[1, 0], [1, 2]], dtype=a.dtype), np.array([0, 1], dtype=b.dtype)
+        array_safe([[1, 0], [1, 2]], dtype=a.dtype, like=a_meta),
+        array_safe([0, 1], dtype=b.dtype, like=b_meta),
     )
     meta = meta_from_array(a, b.ndim, dtype=res.dtype)
     return Array(graph, name, shape=b.shape, chunks=b.chunks, meta=meta)
 
 
-def solve(a, b, sym_pos=False):
+def solve(a, b, sym_pos=None, assume_a="gen"):
     """
     Solve the equation ``a x = b`` for ``x``. By default, use LU
-    decomposition and forward / backward substitutions. When ``sym_pos`` is
-    ``True``, use Cholesky decomposition.
+    decomposition and forward / backward substitutions. When ``assume_a = "pos"``
+    use Cholesky decomposition.
 
     Parameters
     ----------
@@ -1051,21 +1215,50 @@ def solve(a, b, sym_pos=False):
         A square matrix.
     b : (M,) or (M, N) array_like
         Right-hand side matrix in ``a x = b``.
-    sym_pos : bool
+    sym_pos : bool, optional
         Assume a is symmetric and positive definite. If ``True``, use Cholesky
         decomposition.
+
+        .. note::
+            ``sym_pos`` is deprecated and will be removed in a future version.
+            Use ``assume_a = 'pos'`` instead.
+
+    assume_a : {'gen', 'pos'}, optional
+        Type of data matrix. It is used to choose the dedicated solver.
+        Note that Dask does not support 'her' and 'sym' types.
+
+        .. versionchanged:: 2022.8.0
+            ``assume_a = 'pos'`` was previously defined as ``sym_pos = True``.
 
     Returns
     -------
     x : (M,) or (M, N) Array
         Solution to the system ``a x = b``.  Shape of the return matches the
         shape of `b`.
+
+    See Also
+    --------
+    scipy.linalg.solve
     """
-    if sym_pos:
+    if sym_pos is not None:
+        warnings.warn(
+            "The sym_pos keyword is deprecated and should be replaced by using ``assume_a = 'pos'``."
+            "``sym_pos`` will be removed in a future version.",
+            category=FutureWarning,
+        )
+        if sym_pos:
+            assume_a = "pos"
+
+    if assume_a == "pos":
         l, u = _cholesky(a)
-    else:
+    elif assume_a == "gen":
         p, l, u = lu(a)
         b = p.T.dot(b)
+    else:
+        raise ValueError(
+            f"{assume_a = } is not a recognized matrix structure, valid structures in Dask are 'pos' and 'gen'."
+        )
+
     uy = solve_triangular(l, b, lower=True)
     return solve_triangular(u, uy)
 
@@ -1089,9 +1282,7 @@ def inv(a):
 
 
 def _cholesky_lower(a):
-    import scipy.linalg
-
-    return scipy.linalg.cholesky(a, lower=True)
+    return np.linalg.cholesky(a)
 
 
 def cholesky(a, lower=False):
@@ -1125,7 +1316,6 @@ def _cholesky(a):
     Private function to perform Cholesky decomposition, which returns both
     lower and upper triangulars.
     """
-    import scipy.linalg
 
     if a.ndim != 2:
         raise ValueError("Dimension must be 2 to perform cholesky decomposition")
@@ -1159,7 +1349,10 @@ def _cholesky(a):
     for i in range(vdim):
         for j in range(hdim):
             if i < j:
-                dsk[name, i, j] = (np.zeros, (a.chunks[0][i], a.chunks[1][j]))
+                dsk[name, i, j] = (
+                    partial(np.zeros_like, shape=(a.chunks[0][i], a.chunks[1][j])),
+                    meta_from_array(a),
+                )
                 dsk[name_upper, j, i] = (name, i, j)
             elif i == j:
                 target = (a.name, i, j)
@@ -1189,7 +1382,8 @@ def _cholesky(a):
 
     graph_upper = HighLevelGraph.from_collections(name_upper, dsk, dependencies=[a])
     graph_lower = HighLevelGraph.from_collections(name, dsk, dependencies=[a])
-    cho = scipy.linalg.cholesky(np.array([[1, 2], [2, 5]], dtype=a.dtype))
+    a_meta = meta_from_array(a)
+    cho = np.linalg.cholesky(array_safe([[1, 2], [2, 5]], dtype=a.dtype, like=a_meta))
     meta = meta_from_array(a, dtype=cho.dtype)
 
     lower = Array(graph_lower, name, shape=a.shape, chunks=a.chunks, meta=meta)
@@ -1198,9 +1392,8 @@ def _cholesky(a):
     return lower, upper
 
 
-def _sort_decreasing(x):
-    x[::-1].sort()
-    return x
+def _reverse(x):
+    return x[::-1]
 
 
 def lstsq(a, b):
@@ -1220,26 +1413,30 @@ def lstsq(a, b):
     ----------
     a : (M, N) array_like
         "Coefficient" matrix.
-    b : (M,) array_like
-        Ordinate or "dependent variable" values.
+    b : {(M,), (M, K)} array_like
+        Ordinate or "dependent variable" values. If `b` is two-dimensional,
+        the least-squares solution is calculated for each of the `K` columns
+        of `b`.
 
     Returns
     -------
-    x : (N,) Array
+    x : {(N,), (N, K)} Array
         Least-squares solution. If `b` is two-dimensional,
         the solutions are in the `K` columns of `x`.
-    residuals : (1,) Array
+    residuals : {(1,), (K,)} Array
         Sums of residuals; squared Euclidean 2-norm for each column in
         ``b - a*x``.
+        If `b` is 1-dimensional, this is a (1,) shape array.
+        Otherwise the shape is (K,).
     rank : Array
         Rank of matrix `a`.
     s : (min(M, N),) Array
         Singular values of `a`.
     """
     q, r = qr(a)
-    x = solve_triangular(r, q.T.dot(b))
+    x = solve_triangular(r, q.T.conj().dot(b))
     residuals = b - a.dot(x)
-    residuals = (residuals ** 2).sum(keepdims=True)
+    residuals = abs(residuals**2).sum(axis=0, keepdims=b.ndim == 1)
 
     token = tokenize(a, b)
 
@@ -1254,20 +1451,15 @@ def lstsq(a, b):
 
     # singular
     sname = "lstsq-singular-" + token
-    rt = r.T
+    rt = r.T.conj()
     sdsk = {
         (sname, 0): (
-            _sort_decreasing,
-            (np.sqrt, (np.linalg.eigvals, (np.dot, (rt.name, 0, 0), (r.name, 0, 0)))),
+            _reverse,
+            (np.sqrt, (np.linalg.eigvalsh, (np.dot, (rt.name, 0, 0), (r.name, 0, 0)))),
         )
     }
-    graph = HighLevelGraph.from_collections(sname, sdsk, dependencies=[rt])
-    _, _, _, ss = np.linalg.lstsq(
-        np.array([[1, 0], [1, 2]], dtype=a.dtype),
-        np.array([0, 1], dtype=b.dtype),
-        rcond=-1,
-    )
-    meta = meta_from_array(r, 1, dtype=ss.dtype)
+    graph = HighLevelGraph.from_collections(sname, sdsk, dependencies=[rt, r])
+    meta = meta_from_array(residuals, 1)
     s = Array(graph, sname, shape=(r.shape[0],), chunks=r.shape[0], meta=meta)
 
     return x, residuals, rank, s

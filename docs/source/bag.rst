@@ -14,7 +14,12 @@ small memory footprint using Python iterators.  It is similar to a parallel
 version of PyToolz_ or a Pythonic version of the `PySpark RDD`_.
 
 .. _PyToolz: https://toolz.readthedocs.io/en/latest/
-.. _`PySpark RDD`: https://spark.apache.org/docs/latest/api/python/pyspark.html
+.. _`PySpark RDD`: https://spark.apache.org/docs/latest/api/python
+
+Examples
+--------
+
+Visit https://examples.dask.org/bag.html to see and run examples using Dask Bag.
 
 Design
 ------
@@ -92,7 +97,7 @@ comes at cost.  Bags have the following known limitations:
     same way that standard Python containers tend to be slower than NumPy
     arrays and Pandas DataFrames
 4.  Bag's ``groupby`` is slow.  You should try to use Bag's ``foldby`` if possible.
-    Using ``foldby`` requires more thought tough
+    Using ``foldby`` requires more thought though
 
 
 Name

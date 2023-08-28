@@ -1,59 +1,33 @@
-from operator import getitem
+from __future__ import annotations
+
 from functools import partial
+from operator import getitem
 
 import numpy as np
-from toolz import curry
 
-from .core import Array, elemwise, blockwise, apply_infer_dtype, asarray
-from .utils import empty_like_safe, IS_NEP18_ACTIVE
-from ..base import is_dask_collection, normalize_function
-from .. import core
-from ..highlevelgraph import HighLevelGraph
-from ..utils import (
-    skip_doctest,
-    funcname,
-    derived_from,
-    is_dataframe_like,
-    is_series_like,
-    is_index_like,
-)
+from dask import core
+from dask.array.core import Array, apply_infer_dtype, asarray, blockwise, elemwise
+from dask.base import is_dask_collection, normalize_function
+from dask.highlevelgraph import HighLevelGraph
+from dask.utils import derived_from, funcname
 
 
-def __array_wrap__(numpy_ufunc, x, *args, **kwargs):
-    return x.__array_wrap__(numpy_ufunc(x, *args, **kwargs))
-
-
-@curry
-def copy_docstring(target, source=None):
-    target.__doc__ = skip_doctest(source.__doc__)
-    return target
-
-
-def wrap_elemwise(numpy_ufunc, array_wrap=False):
-    """ Wrap up numpy function into dask.array """
+def wrap_elemwise(numpy_ufunc, source=np):
+    """Wrap up numpy function into dask.array"""
 
     def wrapped(*args, **kwargs):
         dsk = [arg for arg in args if hasattr(arg, "_elemwise")]
         if len(dsk) > 0:
-            is_dataframe = (
-                is_dataframe_like(dsk[0])
-                or is_series_like(dsk[0])
-                or is_index_like(dsk[0])
-            )
-            if array_wrap and (is_dataframe or not IS_NEP18_ACTIVE):
-                return dsk[0]._elemwise(__array_wrap__, numpy_ufunc, *args, **kwargs)
-            else:
-                return dsk[0]._elemwise(numpy_ufunc, *args, **kwargs)
+            return dsk[0]._elemwise(numpy_ufunc, *args, **kwargs)
         else:
             return numpy_ufunc(*args, **kwargs)
 
     # functools.wraps cannot wrap ufunc in Python 2.x
     wrapped.__name__ = numpy_ufunc.__name__
-    wrapped.__doc__ = skip_doctest(numpy_ufunc.__doc__)
-    return wrapped
+    return derived_from(source)(wrapped)
 
 
-class da_frompyfunc(object):
+class da_frompyfunc:
     """A serializable `frompyfunc` object"""
 
     def __init__(self, func, nin, nout):
@@ -79,7 +53,7 @@ class da_frompyfunc(object):
     def __getattr__(self, a):
         if not a.startswith("_"):
             return getattr(self._ufunc, a)
-        raise AttributeError("%r object has no attribute %r" % (type(self).__name__, a))
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {a!r}")
 
     def __dir__(self):
         o = set(dir(type(self)))
@@ -95,7 +69,7 @@ def frompyfunc(func, nin, nout):
     return ufunc(da_frompyfunc(func, nin, nout))
 
 
-class ufunc(object):
+class ufunc:
     _forward_attrs = {
         "nin",
         "nargs",
@@ -114,14 +88,13 @@ class ufunc(object):
             )
         self._ufunc = ufunc
         self.__name__ = ufunc.__name__
-        copy_docstring(self, ufunc)
+        if isinstance(ufunc, np.ufunc):
+            derived_from(np)(self)
 
     def __getattr__(self, key):
         if key in self._forward_attrs:
             return getattr(self._ufunc, key)
-        raise AttributeError(
-            "%r object has no attribute %r" % (type(self).__name__, key)
-        )
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {key!r}")
 
     def __dir__(self):
         return list(self._forward_attrs.union(dir(type(self)), self.__dict__))
@@ -142,7 +115,7 @@ class ufunc(object):
         else:
             return self._ufunc(*args, **kwargs)
 
-    @copy_docstring(source=np.ufunc.outer)
+    @derived_from(np.ufunc)
     def outer(self, A, B, **kwargs):
         if self.nin != 2:
             raise ValueError("outer product only supported for binary functions")
@@ -189,7 +162,7 @@ class ufunc(object):
             B_inds,
             dtype=dtype,
             token=self.__name__ + ".outer",
-            **kwargs
+            **kwargs,
         )
 
 
@@ -206,6 +179,7 @@ logaddexp2 = ufunc(np.logaddexp2)
 true_divide = ufunc(np.true_divide)
 floor_divide = ufunc(np.floor_divide)
 negative = ufunc(np.negative)
+positive = ufunc(np.positive)
 power = ufunc(np.power)
 float_power = ufunc(np.float_power)
 remainder = ufunc(np.remainder)
@@ -266,6 +240,8 @@ bitwise_or = ufunc(np.bitwise_or)
 bitwise_xor = ufunc(np.bitwise_xor)
 bitwise_not = ufunc(np.bitwise_not)
 invert = bitwise_not
+left_shift = ufunc(np.left_shift)
+right_shift = ufunc(np.right_shift)
 
 # floating functions
 isfinite = ufunc(np.isfinite)
@@ -291,28 +267,29 @@ rint = ufunc(np.rint)
 fabs = ufunc(np.fabs)
 sign = ufunc(np.sign)
 absolute = ufunc(np.absolute)
+abs = absolute
 
 # non-ufunc elementwise functions
 clip = wrap_elemwise(np.clip)
-isreal = wrap_elemwise(np.isreal, array_wrap=True)
-iscomplex = wrap_elemwise(np.iscomplex, array_wrap=True)
-real = wrap_elemwise(np.real, array_wrap=True)
-imag = wrap_elemwise(np.imag, array_wrap=True)
-fix = wrap_elemwise(np.fix, array_wrap=True)
-i0 = wrap_elemwise(np.i0, array_wrap=True)
-sinc = wrap_elemwise(np.sinc, array_wrap=True)
-nan_to_num = wrap_elemwise(np.nan_to_num, array_wrap=True)
+isreal = wrap_elemwise(np.isreal)
+iscomplex = wrap_elemwise(np.iscomplex)
+real = wrap_elemwise(np.real)
+imag = wrap_elemwise(np.imag)
+fix = wrap_elemwise(np.fix)
+i0 = wrap_elemwise(np.i0)
+sinc = wrap_elemwise(np.sinc)
+nan_to_num = wrap_elemwise(np.nan_to_num)
 
 
-@copy_docstring(source=np.angle)
+@derived_from(np)
 def angle(x, deg=0):
     deg = bool(deg)
     if hasattr(x, "_elemwise"):
-        return x._elemwise(__array_wrap__, np.angle, x, deg)
+        return x._elemwise(np.angle, x, deg)
     return np.angle(x, deg=deg)
 
 
-@copy_docstring(source=np.frexp)
+@derived_from(np)
 def frexp(x):
     # Not actually object dtype, just need to specify something
     tmp = elemwise(np.frexp, x, dtype=object)
@@ -327,7 +304,7 @@ def frexp(x):
         for key in core.flatten(tmp.__dask_keys__())
     }
 
-    a = empty_like_safe(getattr(x, "_meta", x), shape=(1,) * x.ndim, dtype=x.dtype)
+    a = np.empty_like(getattr(x, "_meta", x), shape=(1,) * x.ndim, dtype=x.dtype)
     l, r = np.frexp(a)
 
     graph = HighLevelGraph.from_collections(left, ldsk, dependencies=[tmp])
@@ -337,7 +314,7 @@ def frexp(x):
     return L, R
 
 
-@copy_docstring(source=np.modf)
+@derived_from(np)
 def modf(x):
     # Not actually object dtype, just need to specify something
     tmp = elemwise(np.modf, x, dtype=object)
@@ -352,7 +329,7 @@ def modf(x):
         for key in core.flatten(tmp.__dask_keys__())
     }
 
-    a = empty_like_safe(getattr(x, "_meta", x), shape=(1,) * x.ndim, dtype=x.dtype)
+    a = np.ones_like(getattr(x, "_meta", x), shape=(1,) * x.ndim, dtype=x.dtype)
     l, r = np.modf(a)
 
     graph = HighLevelGraph.from_collections(left, ldsk, dependencies=[tmp])
@@ -362,7 +339,7 @@ def modf(x):
     return L, R
 
 
-@copy_docstring(source=np.divmod)
+@derived_from(np)
 def divmod(x, y):
     res1 = x // y
     res2 = x % y

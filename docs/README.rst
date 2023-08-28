@@ -1,10 +1,15 @@
-To build a local copy of the dask docs, install the programs in
-requirements-docs.txt and run 'make html'. If you use the conda package manager
-these commands suffice::
+To build a local copy of the Dask documentation, install the packages in
+``requirements-docs.txt`` and run ``make html``.
 
-  git clone git@github.com:dask/dask.git
-  cd dask/docs
-  conda create -n daskdocs --file requirements-docs.txt
+Optionally create and activate a ``conda`` environment first::
+
+  conda create -n daskdocs -c conda-forge python=3.11
   conda activate daskdocs
-  make html
-  open build/html/index.html
+
+Install the dependencies with ``pip``::
+
+  python -m pip install -r requirements-docs.txt
+
+After running ``make html`` the generated HTML documentation can be found in
+the ``build/html`` directory. Open ``build/html/index.html`` to view the home
+page for the documentation.

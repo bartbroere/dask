@@ -1,14 +1,20 @@
+from __future__ import annotations
+
+import copy
 import os
-from functools import partial
 import re
-from operator import add, neg
 import sys
+from functools import partial
+from operator import add, neg
+
 import pytest
 
+ipycytoscape = pytest.importorskip("ipycytoscape")
+from dask.dot import _to_cytoscape_json, cytoscape_graph
 
 if sys.flags.optimize != 2:
     pytest.importorskip("graphviz")
-    from dask.dot import dot_graph, task_label, label, to_graphviz
+    from dask.dot import dot_graph, label, task_label, to_graphviz
 else:
     pytestmark = pytest.mark.skipif(
         True, reason="graphviz exception with Python -OO flag"
@@ -18,7 +24,7 @@ from dask import delayed
 from dask.utils import ensure_not_exists
 
 try:
-    from IPython.display import Image, SVG
+    from IPython.display import SVG, Image
 except ImportError:
     ipython_not_installed = True
     Image = None
@@ -92,7 +98,7 @@ def test_to_graphviz():
     assert len(labels) == 10  # 10 nodes total
     assert set(labels) == {"c", "d", "e", "f", '""'}
     shapes = list(filter(None, map(get_shape, g.body)))
-    assert set(shapes) == set(("box", "circle"))
+    assert set(shapes) == {"box", "circle"}
 
 
 def test_to_graphviz_custom():
@@ -104,7 +110,43 @@ def test_to_graphviz_custom():
     labels = set(filter(None, map(get_label, g.body)))
     assert labels == {"neg_c", "d", "e", "f", '""'}
     shapes = list(filter(None, map(get_shape, g.body)))
-    assert set(shapes) == set(("box", "circle", "square", "ellipse"))
+    assert set(shapes) == {"box", "circle", "square", "ellipse"}
+
+
+def test_cytoscape_graph_custom(tmp_path):
+    # Check that custom styling and layout propagates through
+    g = cytoscape_graph(
+        dsk,
+        filename=os.fsdecode(tmp_path / "mydask.html"),
+        rankdir="LR",
+        node_sep=20,
+        edge_sep=30,
+        spacing_factor=2,
+        edge_style={"line-color": "red"},
+        node_style={"background-color": "green"},
+    )
+    sty = g.cytoscape_style
+    layout = g.cytoscape_layout
+    node_sty = next(s for s in sty if s["selector"] == "node")["style"]
+    edge_sty = next(s for s in sty if s["selector"] == "edge")["style"]
+
+    assert edge_sty["line-color"] == "red"
+    assert node_sty["background-color"] == "green"
+    assert layout["rankDir"] == "LR"
+    assert layout["nodeSep"] == 20
+    assert layout["edgeSep"] == 30
+    assert layout["spacingFactor"] == 2
+
+
+def test_cytoscape_graph_color():
+    pytest.importorskip("matplotlib.pyplot")
+    from dask.delayed import Delayed
+
+    g = Delayed("f", dsk).visualize(engine="cytoscape")
+    init_color = g.graph.nodes[0].data["color"]
+    # Check that we changed the semantic color
+    g = Delayed("f", dsk).visualize(engine="cytoscape", color="order")
+    assert any(n.data["color"] != init_color for n in g.graph.nodes)
 
 
 def test_to_graphviz_attributes():
@@ -119,6 +161,74 @@ def test_aliases():
     labels = list(filter(None, map(get_label, g.body)))
     assert len(labels) == 2
     assert len(g.body) - len(labels) == 1  # Single edge
+
+
+def test_to_graphviz_verbose():
+    g = to_graphviz(dsk, verbose=True)
+    labels = list(filter(None, map(get_label, g.body)))
+    assert len(labels) == 10  # 10 nodes total
+    assert set(labels) == {"a", "b", "c", "d", "e", "f"}
+    shapes = list(filter(None, map(get_shape, g.body)))
+    assert set(shapes) == {"box", "circle"}
+
+
+def test__to_cytoscape_json_verbose():
+    data = _to_cytoscape_json(dsk, verbose=True)
+    labels = list(map(lambda x: x["data"]["label"], data["nodes"]))
+    assert len(labels) == 10
+    assert set(labels) == {"a", "b", "c", "d", "e", "f"}
+    shapes = list(map(lambda x: x["data"]["shape"], data["nodes"]))
+    assert set(shapes) == {"ellipse", "rectangle"}
+
+
+def test_to_graphviz_collapse_outputs():
+    g = to_graphviz(dsk, collapse_outputs=True)
+    labels = list(filter(None, map(get_label, g.body)))
+    assert len(labels) == 6  # 6 nodes total
+    assert set(labels) == {"c", "d", "e", "f", '""'}
+    shapes = list(filter(None, map(get_shape, g.body)))
+    assert set(shapes) == {"box", "circle"}
+
+
+def test__to_cytoscape_json_collapse_outputs():
+    data = _to_cytoscape_json(dsk, collapse_outputs=True)
+    labels = list(map(lambda x: x["data"]["label"], data["nodes"]))
+    assert len(labels) == 6  # 6 nodes total
+    assert set(labels) == {"c", "d", "e", "f", ""}
+    shapes = list(map(lambda x: x["data"]["shape"], data["nodes"]))
+    assert set(shapes) == {"ellipse", "rectangle"}
+
+
+def test_to_graphviz_collapse_outputs_and_verbose():
+    g = to_graphviz(dsk, collapse_outputs=True, verbose=True)
+    labels = list(filter(None, map(get_label, g.body)))
+    assert len(labels) == 6  # 6 nodes total
+    assert set(labels) == {"a", "b", "c", "d", "e", "f"}
+    shapes = list(filter(None, map(get_shape, g.body)))
+    assert set(shapes) == {"box", "circle"}
+
+
+def test__to_cytoscape_json_collapse_outputs_and_verbose():
+    data = _to_cytoscape_json(dsk, collapse_outputs=True, verbose=True)
+    labels = list(map(lambda x: x["data"]["label"], data["nodes"]))
+    assert len(labels) == 6  # 6 nodes total
+    assert set(labels) == {"a", "b", "c", "d", "e", "f"}
+    shapes = list(map(lambda x: x["data"]["shape"], data["nodes"]))
+    assert set(shapes) == {"ellipse", "rectangle"}
+
+
+def test_to_graphviz_with_unconnected_node():
+    dsk2 = dsk.copy()
+    dsk2["g"] = 3
+    g = to_graphviz(dsk2, verbose=True)
+    labels = list(filter(None, map(get_label, g.body)))
+    assert len(labels) == 11  # 11 nodes total
+    assert set(labels) == {"a", "b", "c", "d", "e", "f", "g"}
+
+    g = to_graphviz(dsk, verbose=True, collapse_outputs=True)
+    labels = list(filter(None, map(get_label, g.body)))
+    assert len(labels) == 6  # 6 nodes total
+    assert set(labels) == {"a", "b", "c", "d", "e", "f"}
 
 
 @pytest.mark.parametrize(
@@ -136,6 +246,11 @@ def test_aliases():
         ("pdf", type(None)),
         pytest.param("svg", SVG, marks=ipython_not_installed_mark),
     ],
+)
+@pytest.mark.xfail(
+    sys.platform == "win32",
+    reason="graphviz/pango on conda-forge currently broken for windows",
+    strict=False,
 )
 def test_dot_graph(tmpdir, format, typ):
     # Use a name that the shell would interpret specially to ensure that we're
@@ -170,6 +285,11 @@ def test_dot_graph(tmpdir, format, typ):
         pytest.param("svg", SVG, marks=ipython_not_installed_mark),
     ],
 )
+@pytest.mark.xfail(
+    sys.platform == "win32",
+    reason="graphviz/pango on conda-forge currently broken for windows",
+    strict=False,
+)
 def test_dot_graph_no_filename(tmpdir, format, typ):
     before = tmpdir.listdir()
     result = dot_graph(dsk, filename=None, format=format)
@@ -180,6 +300,11 @@ def test_dot_graph_no_filename(tmpdir, format, typ):
 
 
 @ipython_not_installed_mark
+@pytest.mark.xfail(
+    sys.platform == "win32",
+    reason="graphviz/pango on conda-forge currently broken for windows",
+    strict=False,
+)
 def test_dot_graph_defaults():
     # Test with default args.
     default_name = "mydask"
@@ -191,6 +316,17 @@ def test_dot_graph_defaults():
         result = dot_graph(dsk)
         assert os.path.isfile(target)
         assert isinstance(result, Image)
+    finally:
+        ensure_not_exists(target)
+
+
+def test_cytoscape_graph(tmpdir):
+    target = str(tmpdir.join("mydask.html"))
+    ensure_not_exists(target)
+    try:
+        result = cytoscape_graph(dsk, target)
+        assert os.path.isfile(target)
+        assert isinstance(result, ipycytoscape.CytoscapeWidget)
     finally:
         ensure_not_exists(target)
 
@@ -217,11 +353,15 @@ def test_dot_graph_defaults():
         ),
     ],
 )
-def test_filenames_and_formats(filename, format, target, expected_result_type):
-    result = dot_graph(dsk, filename=filename, format=format)
-    assert os.path.isfile(target)
+@pytest.mark.xfail(
+    sys.platform == "win32",
+    reason="graphviz/pango on conda-forge currently broken for windows",
+    strict=False,
+)
+def test_filenames_and_formats(tmpdir, filename, format, target, expected_result_type):
+    result = dot_graph(dsk, filename=str(tmpdir.join(filename)), format=format)
+    assert tmpdir.join(target).exists()
     assert isinstance(result, expected_result_type)
-    ensure_not_exists(target)
 
 
 def test_delayed_kwargs_apply():
@@ -232,3 +372,24 @@ def test_delayed_kwargs_apply():
     label = task_label(x.dask[x.key])
     assert "f" in label
     assert "apply" not in label
+
+
+@pytest.mark.parametrize("viz_func", [to_graphviz, _to_cytoscape_json])
+def test_immutable_attributes(viz_func):
+    def inc(x):
+        return x + 1
+
+    dsk = {"a": (inc, 1), "b": (inc, 2), "c": (add, "a", "b")}
+    attrs_func = {"a": {}}
+    attrs_data = {"b": {}}
+    attrs_func_test = copy.deepcopy(attrs_func)
+    attrs_data_test = copy.deepcopy(attrs_data)
+
+    viz_func(
+        dsk,
+        function_attributes=attrs_func,
+        data_attributes=attrs_data,
+    )
+
+    assert attrs_func_test == attrs_func
+    assert attrs_data_test == attrs_data

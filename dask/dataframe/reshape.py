@@ -1,15 +1,22 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_list_like, is_scalar
 
-from .core import Series, DataFrame, map_partitions, apply_concat_apply
-from . import methods
-from .utils import is_categorical_dtype, is_scalar, has_known_categories, PANDAS_VERSION
-from ..utils import M
-import sys
+import dask
+from dask.dataframe import methods
+from dask.dataframe._compat import PANDAS_GE_200
+from dask.dataframe.core import DataFrame, Series, apply_concat_apply, map_partitions
+from dask.dataframe.utils import has_known_categories
+from dask.utils import M, get_meta_library
 
 ###############################################################
 # Dummies
 ###############################################################
+
+
+_get_dummies_dtype_default = bool if PANDAS_GE_200 else np.uint8
 
 
 def get_dummies(
@@ -20,8 +27,8 @@ def get_dummies(
     columns=None,
     sparse=False,
     drop_first=False,
-    dtype=np.uint8,
-    **kwargs
+    dtype=_get_dummies_dtype_default,
+    **kwargs,
 ):
     """
     Convert categorical variable into dummy/indicator variables.
@@ -58,9 +65,8 @@ def get_dummies(
         Whether to get k-1 dummies out of k categorical levels by removing the
         first level.
 
-    dtype : dtype, default np.uint8
+    dtype : dtype, default bool
         Data type for new columns. Only a single dtype is allowed.
-        Only valid if pandas is 0.23.0 or newer.
 
         .. versionadded:: 0.18.2
 
@@ -91,7 +97,7 @@ def get_dummies(
     0              uint8  uint8  uint8
     2                ...    ...    ...
     3                ...    ...    ...
-    Dask Name: get_dummies, 4 tasks
+    Dask Name: get_dummies, 2 graph layers
     >>> dd.get_dummies(s).compute()  # doctest: +ELLIPSIS
        a  b  c
     0  1  0  0
@@ -103,17 +109,6 @@ def get_dummies(
     --------
     pandas.get_dummies
     """
-    if PANDAS_VERSION >= "0.23.0":
-        # dtype added to pandas
-        kwargs["dtype"] = dtype
-    elif dtype != np.uint8:
-        # User specified something other than the default.
-        raise ValueError(
-            "Your version of pandas is '{}'. "
-            "The 'dtype' keyword was added in pandas "
-            "0.23.0.".format(PANDAS_VERSION)
-        )
-
     if isinstance(data, (pd.Series, pd.DataFrame)):
         return pd.get_dummies(
             data,
@@ -123,7 +118,8 @@ def get_dummies(
             columns=columns,
             sparse=sparse,
             drop_first=drop_first,
-            **kwargs
+            dtype=dtype,
+            **kwargs,
         )
 
     not_cat_msg = (
@@ -140,7 +136,7 @@ def get_dummies(
     )
 
     if isinstance(data, Series):
-        if not is_categorical_dtype(data):
+        if not methods.is_categorical_dtype(data):
             raise NotImplementedError(not_cat_msg)
         if not has_known_categories(data):
             raise NotImplementedError(unknown_cat_msg)
@@ -148,31 +144,18 @@ def get_dummies(
         if columns is None:
             if (data.dtypes == "object").any():
                 raise NotImplementedError(not_cat_msg)
+            if (data.dtypes == "string").any():
+                raise NotImplementedError(not_cat_msg)
             columns = data._meta.select_dtypes(include=["category"]).columns
         else:
-            if not all(is_categorical_dtype(data[c]) for c in columns):
+            if not all(methods.is_categorical_dtype(data[c]) for c in columns):
                 raise NotImplementedError(not_cat_msg)
 
         if not all(has_known_categories(data[c]) for c in columns):
             raise NotImplementedError(unknown_cat_msg)
 
-    # We explicitly create `meta` on `data._meta` (the empty version) to
-    # work around https://github.com/pandas-dev/pandas/issues/21993
-    package_name = data._meta.__class__.__module__.split(".")[0]
-    dummies = sys.modules[package_name].get_dummies
-    meta = dummies(
-        data._meta,
-        prefix=prefix,
-        prefix_sep=prefix_sep,
-        dummy_na=dummy_na,
-        columns=columns,
-        sparse=sparse,
-        drop_first=drop_first,
-        **kwargs
-    )
-
     return map_partitions(
-        dummies,
+        get_meta_library(data).get_dummies,
         data,
         prefix=prefix,
         prefix_sep=prefix_sep,
@@ -180,8 +163,8 @@ def get_dummies(
         columns=columns,
         sparse=sparse,
         drop_first=drop_first,
-        meta=meta,
-        **kwargs
+        dtype=dtype,
+        **kwargs,
     )
 
 
@@ -194,7 +177,8 @@ def pivot_table(df, index=None, columns=None, values=None, aggfunc="mean"):
     """
     Create a spreadsheet-style pivot table as a DataFrame. Target ``columns``
     must have category dtype to infer result's ``columns``.
-    ``index``, ``columns``, ``values`` and ``aggfunc`` must be all scalar.
+    ``index``, ``columns``, and ``aggfunc`` must be all scalar.
+    ``values`` can be scalar or list-like.
 
     Parameters
     ----------
@@ -203,9 +187,9 @@ def pivot_table(df, index=None, columns=None, values=None, aggfunc="mean"):
         column to be index
     columns : scalar
         column to be columns
-    values : scalar
-        column to aggregate
-    aggfunc : {'mean', 'sum', 'count'}, default 'mean'
+    values : scalar or list(scalar)
+        column(s) to aggregate
+    aggfunc : {'mean', 'sum', 'count', 'first', 'last'}, default 'mean'
 
     Returns
     -------
@@ -220,7 +204,7 @@ def pivot_table(df, index=None, columns=None, values=None, aggfunc="mean"):
         raise ValueError("'index' must be the name of an existing column")
     if not is_scalar(columns) or columns is None:
         raise ValueError("'columns' must be the name of an existing column")
-    if not is_categorical_dtype(df[columns]):
+    if not methods.is_categorical_dtype(df[columns]):
         raise ValueError("'columns' must be category dtype")
     if not has_known_categories(df[columns]):
         raise ValueError(
@@ -228,17 +212,51 @@ def pivot_table(df, index=None, columns=None, values=None, aggfunc="mean"):
             "`df[columns].cat.as_known()` beforehand to ensure "
             "known categories"
         )
-    if not is_scalar(values) or values is None:
-        raise ValueError("'values' must be the name of an existing column")
-    if not is_scalar(aggfunc) or aggfunc not in ("mean", "sum", "count"):
-        raise ValueError("aggfunc must be either 'mean', 'sum' or 'count'")
+    if not (
+        is_list_like(values)
+        and all([is_scalar(v) for v in values])
+        or is_scalar(values)
+    ):
+        raise ValueError("'values' must refer to an existing column or columns")
+
+    available_aggfuncs = ["mean", "sum", "count", "first", "last"]
+
+    if not is_scalar(aggfunc) or aggfunc not in available_aggfuncs:
+        raise ValueError(
+            "aggfunc must be either " + ", ".join(f"'{x}'" for x in available_aggfuncs)
+        )
 
     # _emulate can't work for empty data
     # the result must have CategoricalIndex columns
-    new_columns = pd.CategoricalIndex(df[columns].cat.categories, name=columns)
-    meta = pd.DataFrame(
-        columns=new_columns, dtype=np.float64, index=pd.Index(df._meta[index])
-    )
+
+    columns_contents = pd.CategoricalIndex(df[columns].cat.categories, name=columns)
+    if is_scalar(values):
+        new_columns = columns_contents
+    else:
+        new_columns = pd.MultiIndex.from_product(
+            (sorted(values), columns_contents), names=[None, columns]
+        )
+
+    if aggfunc in ["first", "last"]:
+        # Infer datatype as non-numeric values are allowed
+        if is_scalar(values):
+            meta = pd.DataFrame(
+                columns=new_columns,
+                dtype=df[values].dtype,
+                index=pd.Index(df._meta[index]),
+            )
+        else:
+            meta = pd.DataFrame(
+                columns=new_columns,
+                index=pd.Index(df._meta[index]),
+            )
+            for value_col in values:
+                meta[value_col] = meta[value_col].astype(df[values].dtypes[value_col])
+    else:
+        # Use float64 as other aggregate functions require numerical data
+        meta = pd.DataFrame(
+            columns=new_columns, dtype=np.float64, index=pd.Index(df._meta[index])
+        )
 
     kwargs = {"index": index, "columns": columns, "values": values}
 
@@ -268,6 +286,24 @@ def pivot_table(df, index=None, columns=None, values=None, aggfunc="mean"):
         return pv_count
     elif aggfunc == "mean":
         return pv_sum / pv_count
+    elif aggfunc == "first":
+        return apply_concat_apply(
+            [df],
+            chunk=methods.pivot_first,
+            aggregate=methods.pivot_agg_first,
+            meta=meta,
+            token="pivot_table_first",
+            chunk_kwargs=kwargs,
+        )
+    elif aggfunc == "last":
+        return apply_concat_apply(
+            [df],
+            chunk=methods.pivot_last,
+            aggregate=methods.pivot_agg_last,
+            meta=meta,
+            token="pivot_table_last",
+            chunk_kwargs=kwargs,
+        )
     else:
         raise ValueError
 
@@ -320,13 +356,15 @@ def melt(
 
     from dask.dataframe.core import no_default
 
-    return frame.map_partitions(
-        M.melt,
-        meta=no_default,
-        id_vars=id_vars,
-        value_vars=value_vars,
-        var_name=var_name,
-        value_name=value_name,
-        col_level=col_level,
-        token="melt",
-    )
+    # let pandas do upcasting as needed during melt
+    with dask.config.set({"dataframe.convert-string": False}):
+        return frame.map_partitions(
+            M.melt,
+            meta=no_default,
+            id_vars=id_vars,
+            value_vars=value_vars,
+            var_name=var_name,
+            value_name=value_name,
+            col_level=col_level,
+            token="melt",
+        )

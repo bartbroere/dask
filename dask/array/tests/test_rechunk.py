@@ -1,21 +1,33 @@
-from itertools import product
+from __future__ import annotations
+
 import warnings
+from itertools import product
 
 import pytest
 
 np = pytest.importorskip("numpy")
+import math
 
 import dask
-from dask.utils import funcname
-from dask.array.utils import assert_eq
-from dask.array.rechunk import intersect_chunks, rechunk, normalize_chunks
-from dask.array.rechunk import cumdims_label, _breakpoints, _intersect_1d, _old_to_new
-from dask.array.rechunk import plan_rechunk, divide_to_width, merge_to_number
 import dask.array as da
+from dask.array.rechunk import (
+    _breakpoints,
+    _intersect_1d,
+    cumdims_label,
+    divide_to_width,
+    intersect_chunks,
+    merge_to_number,
+    normalize_chunks,
+    old_to_new,
+    plan_rechunk,
+    rechunk,
+)
+from dask.array.utils import assert_eq
+from dask.utils import funcname
 
 
 def test_rechunk_internals_1():
-    """ Test the cumdims_label and _breakpoints and
+    """Test the cumdims_label and _breakpoints and
     _intersect_1d internal funcs to rechunk."""
     new = cumdims_label(((1, 1, 2), (1, 5, 1)), "n")
     old = cumdims_label(((4,), (1,) * 5), "o")
@@ -51,9 +63,40 @@ def test_rechunk_internals_1():
     ]
     assert i1d[1] == answer4
 
+    new = cumdims_label(((1, 1, 2), (1, 5, 1, 0)), "n")
+    breaks = tuple(_breakpoints(o, n) for o, n in zip(old, new))
+    answer5 = (
+        ("o", 0),
+        ("n", 0),
+        ("o", 1),
+        ("n", 1),
+        ("o", 2),
+        ("o", 3),
+        ("o", 4),
+        ("o", 5),
+        ("n", 6),
+        ("n", 7),
+        ("n", 7),
+    )
+    assert breaks[1] == answer5
+    i1d = [_intersect_1d(b) for b in breaks]
+    answer6 = [
+        [(0, slice(0, 1))],
+        [
+            (1, slice(0, 1)),
+            (2, slice(0, 1)),
+            (3, slice(0, 1)),
+            (4, slice(0, 1)),
+            (5, slice(0, 1)),
+        ],
+        [(5, slice(1, 2))],
+        [(5, slice(2, 2))],
+    ]
+    assert i1d[1] == answer6
+
 
 def test_intersect_1():
-    """ Convert 1 D chunks"""
+    """Convert 1 D chunks"""
     old = ((10, 10, 10, 10, 10),)
     new = ((25, 5, 20),)
     answer = [
@@ -66,7 +109,7 @@ def test_intersect_1():
 
 
 def test_intersect_2():
-    """ Convert 1 D chunks"""
+    """Convert 1 D chunks"""
     old = ((20, 20, 20, 20, 20),)
     new = ((58, 4, 20, 18),)
     answer = [
@@ -81,7 +124,7 @@ def test_intersect_2():
 
 def test_rechunk_1d():
     """Try rechunking a random 1d matrix"""
-    a = np.random.uniform(0, 1, 30)
+    a = np.random.default_rng().uniform(0, 1, 30)
     x = da.from_array(a, chunks=((10,) * 3,))
     new = ((5,) * 6,)
     x2 = rechunk(x, chunks=new)
@@ -91,7 +134,7 @@ def test_rechunk_1d():
 
 def test_rechunk_2d():
     """Try rechunking a random 2d matrix"""
-    a = np.random.uniform(0, 1, 300).reshape((10, 30))
+    a = np.random.default_rng().uniform(0, 1, 300).reshape((10, 30))
     x = da.from_array(a, chunks=((1, 2, 3, 4), (5,) * 6))
     new = ((5, 5), (15,) * 2)
     x2 = rechunk(x, chunks=new)
@@ -102,7 +145,7 @@ def test_rechunk_2d():
 def test_rechunk_4d():
     """Try rechunking a random 4d matrix"""
     old = ((5, 5),) * 4
-    a = np.random.uniform(0, 1, 10000).reshape((10,) * 4)
+    a = np.random.default_rng().uniform(0, 1, 10000).reshape((10,) * 4)
     x = da.from_array(a, chunks=old)
     new = ((10,),) * 4
     x2 = rechunk(x, chunks=new)
@@ -111,7 +154,7 @@ def test_rechunk_4d():
 
 
 def test_rechunk_expand():
-    a = np.random.uniform(0, 1, 100).reshape((10, 10))
+    a = np.random.default_rng().uniform(0, 1, 100).reshape((10, 10))
     x = da.from_array(a, chunks=(5, 5))
     y = x.rechunk(chunks=((3, 3, 3, 1), (3, 3, 3, 1)))
     assert np.all(y.compute() == a)
@@ -119,7 +162,7 @@ def test_rechunk_expand():
 
 def test_rechunk_expand2():
     (a, b) = (3, 2)
-    orig = np.random.uniform(0, 1, a ** b).reshape((a,) * b)
+    orig = np.random.default_rng().uniform(0, 1, a**b).reshape((a,) * b)
     for off, off2 in product(range(1, a - 1), range(1, a - 1)):
         old = ((a - off, off),) * b
         x = da.from_array(orig, chunks=old)
@@ -132,10 +175,10 @@ def test_rechunk_expand2():
 
 
 def test_rechunk_method():
-    """ Test rechunking can be done as a method of dask array."""
+    """Test rechunking can be done as a method of dask array."""
     old = ((5, 2, 3),) * 4
     new = ((3, 3, 3, 1),) * 4
-    a = np.random.uniform(0, 1, 10000).reshape((10,) * 4)
+    a = np.random.default_rng().uniform(0, 1, 10000).reshape((10,) * 4)
     x = da.from_array(a, chunks=old)
     x2 = x.rechunk(chunks=new)
     assert x2.chunks == new
@@ -143,11 +186,11 @@ def test_rechunk_method():
 
 
 def test_rechunk_blockshape():
-    """ Test that blockshape can be used."""
+    """Test that blockshape can be used."""
     new_shape, new_chunks = (10, 10), (4, 3)
     new_blockdims = normalize_chunks(new_chunks, new_shape)
     old_chunks = ((4, 4, 2), (3, 3, 3, 1))
-    a = np.random.uniform(0, 1, 100).reshape((10, 10))
+    a = np.random.default_rng().uniform(0, 1, 100).reshape((10, 10))
     x = da.from_array(a, chunks=old_chunks)
     check1 = rechunk(x, chunks=new_chunks)
     assert check1.chunks == new_blockdims
@@ -172,6 +215,10 @@ def test_rechunk_with_dict():
     y = x.rechunk(chunks={0: -1})
     assert y.chunks == ((24,), (8, 8, 8))
 
+    x = da.ones((24, 24), chunks=(4, 8))
+    y = x.rechunk(chunks={0: None, 1: "auto"})
+    assert y.chunks == ((4, 4, 4, 4, 4, 4), (24,))
+
 
 def test_rechunk_with_empty_input():
     x = da.ones((24, 24), chunks=(4, 8))
@@ -182,6 +229,10 @@ def test_rechunk_with_empty_input():
 def test_rechunk_with_null_dimensions():
     x = da.from_array(np.ones((24, 24)), chunks=(4, 8))
     assert x.rechunk(chunks=(None, 4)).chunks == da.ones((24, 24), chunks=(4, 4)).chunks
+    assert (
+        x.rechunk(chunks={0: None, 1: 4}).chunks
+        == da.ones((24, 24), chunks=(4, 4)).chunks
+    )
 
 
 def test_rechunk_with_integer():
@@ -199,6 +250,14 @@ def test_rechunk_0d():
     assert y.compute() == a
 
 
+@pytest.mark.parametrize(
+    "arr", [da.array([]), da.array([[], []]), da.array([[[]], [[]]])]
+)
+def test_rechunk_empty_array(arr):
+    arr.rechunk()
+    assert arr.size == 0
+
+
 def test_rechunk_empty():
     x = da.ones((0, 10), chunks=(5, 5))
     y = x.rechunk((2, 2))
@@ -206,10 +265,57 @@ def test_rechunk_empty():
     assert_eq(x, y)
 
 
+def test_rechunk_zero_dim_array():
+    x = da.zeros((4, 0), chunks=3)
+    y = x.rechunk({0: 4})
+    assert y.chunks == ((4,), (0,))
+    assert_eq(x, y)
+
+
+def test_rechunk_zero_dim_array_II():
+    x = da.zeros((4, 0, 6, 10), chunks=3)
+    y = x.rechunk({0: 4, 2: 2})
+    assert y.chunks == ((4,), (0,), (2, 2, 2), (3, 3, 3, 1))
+    assert_eq(x, y)
+
+
 def test_rechunk_same():
     x = da.ones((24, 24), chunks=(4, 8))
     y = x.rechunk(x.chunks)
     assert x is y
+
+
+def test_rechunk_same_fully_unknown():
+    dd = pytest.importorskip("dask.dataframe")
+    x = da.ones(shape=(10, 10), chunks=(5, 10))
+    y = dd.from_array(x).values
+    new_chunks = ((np.nan, np.nan), (10,))
+    assert y.chunks == new_chunks
+    result = y.rechunk(new_chunks)
+    assert y is result
+
+
+def test_rechunk_same_fully_unknown_floats():
+    """Similar to test_rechunk_same_fully_unknown but testing the behavior if
+    ``float("nan")`` is used instead of the recommended ``np.nan``
+    """
+    dd = pytest.importorskip("dask.dataframe")
+    x = da.ones(shape=(10, 10), chunks=(5, 10))
+    y = dd.from_array(x).values
+    new_chunks = ((float("nan"), float("nan")), (10,))
+    result = y.rechunk(new_chunks)
+    assert y is result
+
+
+def test_rechunk_same_partially_unknown():
+    dd = pytest.importorskip("dask.dataframe")
+    x = da.ones(shape=(10, 10), chunks=(5, 10))
+    y = dd.from_array(x).values
+    z = da.concatenate([x, y])
+    new_chunks = ((5, 5, np.nan, np.nan), (10,))
+    assert z.chunks == new_chunks
+    result = z.rechunk(new_chunks)
+    assert z is result
 
 
 def test_rechunk_with_zero_placeholders():
@@ -227,7 +333,7 @@ def test_rechunk_minus_one():
 
 
 def test_rechunk_intermediates():
-    x = da.random.normal(10, 0.1, (10, 10), chunks=(10, 1))
+    x = da.random.default_rng().normal(10, 0.1, (10, 10), chunks=(10, 1))
     y = x.rechunk((1, 10))
     assert len(y.dask) > 30
 
@@ -280,9 +386,13 @@ def test_merge_to_number():
     assert chunks == (9,)
 
 
-def _plan(old_chunks, new_chunks, itemsize=1, block_size_limit=1e7):
+def _plan(old_chunks, new_chunks, itemsize=1, block_size_limit=1e7, threshold=4):
     return plan_rechunk(
-        old_chunks, new_chunks, itemsize=itemsize, block_size_limit=block_size_limit
+        old_chunks,
+        new_chunks,
+        itemsize=itemsize,
+        block_size_limit=block_size_limit,
+        threshold=threshold,
     )
 
 
@@ -294,8 +404,8 @@ def _assert_steps(steps, expected):
 def test_plan_rechunk():
     c = (20,) * 2  # coarse
     f = (2,) * 20  # fine
-    nc = (float("nan"),) * 2  # nan-coarse
-    nf = (float("nan"),) * 20  # nan-fine
+    nc = (np.nan,) * 2  # nan-coarse
+    nf = (np.nan,) * 20  # nan-fine
 
     # Trivial cases
     steps = _plan((), ())
@@ -314,6 +424,8 @@ def test_plan_rechunk():
     _assert_steps(steps, [(c, c)])
     steps = _plan((f, c), (c, c))
     _assert_steps(steps, [(c, c)])
+    steps = _plan((c, c, c, c), (c, f, c, c))
+    _assert_steps(steps, [(c, f, c, c)])
 
     # An intermediate is used to reduce graph size
     steps = _plan((f, c), (c, f))
@@ -325,6 +437,10 @@ def test_plan_rechunk():
     # Same, with unknown dim
     steps = _plan((nc + nf, c + c, c + f), (nc + nf, f + f, c + c))
     _assert_steps(steps, steps)
+
+    # Regression test for #5908
+    steps = _plan((c, c), (f, f), threshold=1)
+    _assert_steps(steps, [(f, f)])
 
     # Just at the memory limit => an intermediate is used
     steps = _plan((f, c), (c, f), block_size_limit=400)
@@ -368,7 +484,7 @@ def test_plan_rechunk_5d():
     _assert_steps(steps, [(c, c, c, f, c), (c, c, c, f, f)])
 
 
-def test_plan_rechunk_heterogenous():
+def test_plan_rechunk_heterogeneous():
     c = (10,) * 1  # coarse
     f = (1,) * 10  # fine
     cf = c + f
@@ -411,7 +527,7 @@ def test_plan_rechunk_asymmetric():
 
 def test_rechunk_warning():
     N = 20
-    x = da.random.normal(size=(N, N, 100), chunks=(1, N, 100))
+    x = da.random.default_rng().normal(size=(N, N, 100), chunks=(1, N, 100))
     with warnings.catch_warnings(record=True) as w:
         x = x.rechunk((N, 1, 100))
 
@@ -433,8 +549,8 @@ def test_dont_concatenate_single_chunks(shape, chunks):
 
 
 def test_intersect_nan():
-    old_chunks = ((float("nan"), float("nan")), (8,))
-    new_chunks = ((float("nan"), float("nan")), (4, 4))
+    old_chunks = ((np.nan, np.nan), (8,))
+    new_chunks = ((np.nan, np.nan), (4, 4))
 
     result = list(intersect_chunks(old_chunks, new_chunks))
     expected = [
@@ -447,8 +563,8 @@ def test_intersect_nan():
 
 
 def test_intersect_nan_single():
-    old_chunks = ((float("nan"),), (10,))
-    new_chunks = ((float("nan"),), (5, 5))
+    old_chunks = ((np.nan,), (10,))
+    new_chunks = ((np.nan,), (5, 5))
 
     result = list(intersect_chunks(old_chunks, new_chunks))
     expected = [
@@ -459,9 +575,8 @@ def test_intersect_nan_single():
 
 
 def test_intersect_nan_long():
-
-    old_chunks = (tuple([float("nan")] * 4), (10,))
-    new_chunks = (tuple([float("nan")] * 4), (5, 5))
+    old_chunks = (tuple([np.nan] * 4), (10,))
+    new_chunks = (tuple([np.nan] * 4), (5, 5))
     result = list(intersect_chunks(old_chunks, new_chunks))
     expected = [
         (((0, slice(0, None, None)), (0, slice(0, 5, None))),),
@@ -480,7 +595,7 @@ def test_rechunk_unknown_from_pandas():
     dd = pytest.importorskip("dask.dataframe")
     pd = pytest.importorskip("pandas")
 
-    arr = np.random.randn(50, 10)
+    arr = np.random.default_rng().standard_normal((50, 10))
     x = dd.from_pandas(pd.DataFrame(arr), 2).values
     result = x.rechunk((None, (5, 5)))
     assert np.isnan(x.chunks[0]).all()
@@ -519,46 +634,109 @@ def test_rechunk_unknown_from_array():
         (da.ones(shape=(10, 10), chunks=(10, 2)), (None, (5, 5))),
     ],
 )
-def test_rechunk_unknown(x, chunks):
+def test_rechunk_with_fully_unknown_dimension(x, chunks):
     dd = pytest.importorskip("dask.dataframe")
     y = dd.from_array(x).values
     result = y.rechunk(chunks)
     expected = x.rechunk(chunks)
-
     assert_chunks_match(result.chunks, expected.chunks)
     assert_eq(result, expected)
 
 
-def test_rechunk_unknown_explicit():
+@pytest.mark.parametrize(
+    "x, chunks",
+    [
+        (da.ones(shape=(50, 10), chunks=(25, 10)), (None, 5)),
+        (da.ones(shape=(50, 10), chunks=(25, 10)), {1: 5}),
+        (da.ones(shape=(50, 10), chunks=(25, 10)), (None, (5, 5))),
+        (da.ones(shape=(1000, 10), chunks=(5, 10)), (None, 5)),
+        (da.ones(shape=(1000, 10), chunks=(5, 10)), {1: 5}),
+        (da.ones(shape=(1000, 10), chunks=(5, 10)), (None, (5, 5))),
+        (da.ones(shape=(10, 10), chunks=(10, 10)), (None, 5)),
+        (da.ones(shape=(10, 10), chunks=(10, 10)), {1: 5}),
+        (da.ones(shape=(10, 10), chunks=(10, 10)), (None, (5, 5))),
+        (da.ones(shape=(10, 10), chunks=(10, 2)), (None, 5)),
+        (da.ones(shape=(10, 10), chunks=(10, 2)), {1: 5}),
+        (da.ones(shape=(10, 10), chunks=(10, 2)), (None, (5, 5))),
+    ],
+)
+def test_rechunk_with_partially_unknown_dimension(x, chunks):
+    dd = pytest.importorskip("dask.dataframe")
+    y = dd.from_array(x).values
+    z = da.concatenate([x, y])
+    xx = da.concatenate([x, x])
+    result = z.rechunk(chunks)
+    expected = xx.rechunk(chunks)
+    assert_chunks_match(result.chunks, expected.chunks)
+    assert_eq(result, expected)
+
+
+@pytest.mark.parametrize(
+    "new_chunks",
+    [
+        ((np.nan, np.nan), (5, 5)),
+        ((math.nan, math.nan), (5, 5)),
+        ((float("nan"), float("nan")), (5, 5)),
+    ],
+)
+def test_rechunk_with_fully_unknown_dimension_explicit(new_chunks):
     dd = pytest.importorskip("dask.dataframe")
     x = da.ones(shape=(10, 10), chunks=(5, 2))
     y = dd.from_array(x).values
-    result = y.rechunk(((float("nan"), float("nan")), (5, 5)))
+    result = y.rechunk(new_chunks)
     expected = x.rechunk((None, (5, 5)))
     assert_chunks_match(result.chunks, expected.chunks)
     assert_eq(result, expected)
 
 
+@pytest.mark.parametrize(
+    "new_chunks",
+    [
+        ((5, 5, np.nan, np.nan), (5, 5)),
+        ((5, 5, math.nan, math.nan), (5, 5)),
+        ((5, 5, float("nan"), float("nan")), (5, 5)),
+    ],
+)
+def test_rechunk_with_partially_unknown_dimension_explicit(new_chunks):
+    dd = pytest.importorskip("dask.dataframe")
+    x = da.ones(shape=(10, 10), chunks=(5, 2))
+    y = dd.from_array(x).values
+    z = da.concatenate([x, y])
+    xx = da.concatenate([x, x])
+    result = z.rechunk(new_chunks)
+    expected = xx.rechunk((None, (5, 5)))
+    assert_chunks_match(result.chunks, expected.chunks)
+    assert_eq(result, expected)
+
+
 def assert_chunks_match(left, right):
-    for x, y in zip(left, right):
-        if np.isnan(x).any():
-            assert np.isnan(x).all()
-        else:
-            assert x == y
+    for ldim, rdim in zip(left, right):
+        assert all(np.isnan(l) or l == r for l, r in zip(ldim, rdim))
 
 
 def test_rechunk_unknown_raises():
     dd = pytest.importorskip("dask.dataframe")
 
-    x = dd.from_array(da.ones(shape=(10, 10), chunks=(5, 5))).values
-    with pytest.raises(ValueError):
-        x.rechunk((None, (5, 5, 5)))
+    x = da.ones(shape=(10, 10), chunks=(5, 5))
+    y = dd.from_array(x).values
+    with pytest.raises(ValueError, match="Chunks do not add"):
+        y.rechunk((None, (5, 5, 5)))
+
+    with pytest.raises(ValueError, match="Chunks must be unchanging"):
+        y.rechunk(((np.nan, np.nan, np.nan), (5, 5)))
+
+    with pytest.raises(ValueError, match="Chunks must be unchanging"):
+        y.rechunk(((5, 5), (5, 5)))
+
+    with pytest.raises(ValueError, match="Chunks must be unchanging"):
+        z = da.concatenate([x, y])
+        z.rechunk(((5, 3, 2, np.nan, np.nan), (5, 5)))
 
 
 def test_old_to_new_single():
-    old = ((float("nan"), float("nan")), (8,))
-    new = ((float("nan"), float("nan")), (4, 4))
-    result = _old_to_new(old, new)
+    old = ((np.nan, np.nan), (8,))
+    new = ((np.nan, np.nan), (4, 4))
+    result = old_to_new(old, new)
 
     expected = [
         [[(0, slice(0, None, None))], [(1, slice(0, None, None))]],
@@ -569,9 +747,9 @@ def test_old_to_new_single():
 
 
 def test_old_to_new():
-    old = ((float("nan"),), (10,))
-    new = ((float("nan"),), (5, 5))
-    result = _old_to_new(old, new)
+    old = ((np.nan,), (10,))
+    new = ((np.nan,), (5, 5))
+    result = old_to_new(old, new)
     expected = [
         [[(0, slice(0, None, None))]],
         [[(0, slice(0, 5, None))], [(0, slice(5, 10, None))]],
@@ -581,10 +759,10 @@ def test_old_to_new():
 
 
 def test_old_to_new_large():
-    old = (tuple([float("nan")] * 4), (10,))
-    new = (tuple([float("nan")] * 4), (5, 5))
+    old = (tuple([np.nan] * 4), (10,))
+    new = (tuple([np.nan] * 4), (5, 5))
 
-    result = _old_to_new(old, new)
+    result = old_to_new(old, new)
     expected = [
         [
             [(0, slice(0, None, None))],
@@ -597,18 +775,10 @@ def test_old_to_new_large():
     assert result == expected
 
 
-def test_changing_raises():
-    nan = float("nan")
-    with pytest.raises(ValueError) as record:
-        _old_to_new(((nan, nan), (4, 4)), ((nan, nan, nan), (4, 4)))
-
-    assert "unchanging" in str(record.value)
-
-
 def test_old_to_new_known():
     old = ((10, 10, 10, 10, 10),)
     new = ((25, 5, 20),)
-    result = _old_to_new(old, new)
+    result = old_to_new(old, new)
     expected = [
         [
             [(0, slice(0, 10, None)), (1, slice(0, 10, None)), (2, slice(0, 5, None))],
@@ -693,12 +863,15 @@ def test_rechunk_auto_image_stack(n):
 
     with dask.config.set({"array.chunk-size": "7MiB"}):
         z = x.rechunk("auto")
-        assert z.chunks == ((5,) * (n // 5), (1000,), (1000,))
+        if n == 100:
+            assert z.chunks == ((7,) * 14 + (2,), (1000,), (1000,))
+        else:
+            assert z.chunks == ((7,) * 142 + (6,), (1000,), (1000,))
 
     with dask.config.set({"array.chunk-size": "1MiB"}):
         x = da.ones((n, 1000, 1000), chunks=(1, 1000, 1000), dtype="float64")
         z = x.rechunk("auto")
-        assert z.chunks == ((1,) * n, (250,) * 4, (250,) * 4)
+        assert z.chunks == ((1,) * n, (362, 362, 276), (362, 362, 276))
 
 
 def test_rechunk_down():
@@ -709,14 +882,14 @@ def test_rechunk_down():
 
     with dask.config.set({"array.chunk-size": "1MiB"}):
         z = y.rechunk("auto")
-        assert z.chunks == ((5,) * 20, (250,) * 4, (250,) * 4)
+        assert z.chunks == ((4,) * 25, (511, 489), (511, 489))
 
     with dask.config.set({"array.chunk-size": "1MiB"}):
         z = y.rechunk({0: "auto"})
         assert z.chunks == ((1,) * 100, (1000,), (1000,))
 
         z = y.rechunk({1: "auto"})
-        assert z.chunks == ((10,) * 10, (100,) * 10, (1000,))
+        assert z.chunks == ((10,) * 10, (104,) * 9 + (64,), (1000,))
 
 
 def test_rechunk_zero():
@@ -745,3 +918,248 @@ def test_rechunk_bad_keys():
         x.rechunk({-100: 4})
 
     assert "-100" in str(info.value)
+
+
+def test_balance_basics():
+    arr_len = 220
+
+    x = da.from_array(np.arange(arr_len), chunks=100)
+    balanced = x.rechunk(chunks=100, balance=True)
+    unbalanced = x.rechunk(chunks=100, balance=False)
+    assert unbalanced.chunks[0] == (100, 100, 20)
+    assert balanced.chunks[0] == (110, 110)
+
+
+def test_balance_chunks_unchanged():
+    arr_len = 220
+
+    x = da.from_array(np.arange(arr_len))
+    balanced = x.rechunk(chunks=100, balance=True)
+    unbalanced = x.rechunk(chunks=100, balance=False)
+    assert unbalanced.chunks[0] == (100, 100, 20)
+    assert balanced.chunks[0] == (110, 110)
+
+
+def test_balance_small():
+    arr_len = 13
+
+    x = da.from_array(np.arange(arr_len))
+    balanced = x.rechunk(chunks=4, balance=True)
+    unbalanced = x.rechunk(chunks=4, balance=False)
+    assert balanced.chunks[0] == (5, 5, 3)
+    assert unbalanced.chunks[0] == (4, 4, 4, 1)
+
+    arr_len = 7
+
+    x = da.from_array(np.arange(arr_len))
+    balanced = x.rechunk(chunks=3, balance=True)
+    unbalanced = x.rechunk(chunks=3, balance=False)
+    assert balanced.chunks[0] == (4, 3)
+    assert unbalanced.chunks[0] == (3, 3, 1)
+
+
+def test_balance_n_chunks_size():
+    arr_len = 100
+    n_chunks = 8
+
+    x = da.from_array(np.arange(arr_len))
+    balanced = x.rechunk(chunks=arr_len // n_chunks, balance=True)
+    unbalanced = x.rechunk(chunks=arr_len // n_chunks, balance=False)
+    assert balanced.chunks[0] == (13,) * 7 + (9,)
+    assert unbalanced.chunks[0] == (12,) * 8 + (4,)
+
+
+def test_balance_raises():
+    arr_len = 100
+    n_chunks = 11
+
+    x = da.from_array(np.arange(arr_len))
+    with pytest.warns(UserWarning, match="Try increasing the chunk size"):
+        balanced = x.rechunk(chunks=arr_len // n_chunks, balance=True)
+    unbalanced = x.rechunk(chunks=arr_len // n_chunks, balance=False)
+    assert balanced.chunks == unbalanced.chunks
+
+    n_chunks = 10
+    x.rechunk(chunks=arr_len // n_chunks, balance=True)
+
+
+def test_balance_basics_2d():
+    N = 210
+
+    x = da.from_array(np.random.default_rng().uniform(size=(N, N)))
+    balanced = x.rechunk(chunks=(100, 100), balance=True)
+    unbalanced = x.rechunk(chunks=(100, 100), balance=False)
+    assert unbalanced.chunks == ((100, 100, 10), (100, 100, 10))
+    assert balanced.chunks == ((105, 105), (105, 105))
+
+
+def test_balance_2d_negative_dimension():
+    N = 210
+
+    x = da.from_array(np.random.default_rng().uniform(size=(N, N)))
+    balanced = x.rechunk(chunks=(100, -1), balance=True)
+    unbalanced = x.rechunk(chunks=(100, -1), balance=False)
+    assert unbalanced.chunks == ((100, 100, 10), (N,))
+    assert balanced.chunks == ((105, 105), (N,))
+
+
+def test_balance_different_inputs():
+    N = 210
+
+    x = da.from_array(np.random.default_rng().uniform(size=(N, N)))
+    balanced = x.rechunk(chunks=("10MB", -1), balance=True)
+    unbalanced = x.rechunk(chunks=("10MB", -1), balance=False)
+    assert balanced.chunks == unbalanced.chunks
+    assert balanced.chunks[1] == (N,)
+
+
+def test_balance_split_into_n_chunks():
+    # Some prime numbers around 1000
+    array_lens = [
+        991,
+        997,
+        1009,
+        1013,
+        1019,
+        1021,
+        1031,
+        1033,
+        1039,
+        1049,
+        1051,
+        1061,
+        1063,
+        1069,
+    ]
+
+    for N in array_lens:
+        for nchunks in range(1, 20):
+            x = da.from_array(np.random.default_rng().uniform(size=N))
+            y = x.rechunk(chunks=len(x) // nchunks, balance=True)
+            assert len(y.chunks[0]) == nchunks
+
+
+def test_rechunk_with_zero():
+    a = da.ones((8, 8), chunks=(4, 4))
+    result = a.rechunk(((4, 4), (4, 0, 0, 4)))
+    expected = da.ones((8, 8), chunks=((4, 4), (4, 0, 0, 4)))
+
+    # reverse:
+    a, expected = expected, a
+    result = a.rechunk((4, 4))
+    assert_eq(result, expected)
+
+
+def test_intersect_chunks_with_nonzero():
+    from dask.array.rechunk import intersect_chunks
+
+    old = ((4, 4), (2,))
+    new = ((8,), (1, 1))
+    result = list(intersect_chunks(old, new))
+    expected = [
+        (
+            ((0, slice(0, 4, None)), (0, slice(0, 1, None))),
+            ((1, slice(0, 4, None)), (0, slice(0, 1, None))),
+        ),
+        (
+            ((0, slice(0, 4, None)), (0, slice(1, 2, None))),
+            ((1, slice(0, 4, None)), (0, slice(1, 2, None))),
+        ),
+    ]
+    assert result == expected
+
+
+def test_intersect_chunks_with_zero():
+    from dask.array.rechunk import intersect_chunks
+
+    old = ((4, 4), (2,))
+    new = ((4, 0, 0, 4), (1, 1))
+    result = list(intersect_chunks(old, new))
+
+    expected = [
+        (((0, slice(0, 4, None)), (0, slice(0, 1, None))),),
+        (((0, slice(0, 4, None)), (0, slice(1, 2, None))),),
+        (((1, slice(0, 0, None)), (0, slice(0, 1, None))),),
+        (((1, slice(0, 0, None)), (0, slice(1, 2, None))),),
+        (((1, slice(0, 0, None)), (0, slice(0, 1, None))),),
+        (((1, slice(0, 0, None)), (0, slice(1, 2, None))),),
+        (((1, slice(0, 4, None)), (0, slice(0, 1, None))),),
+        (((1, slice(0, 4, None)), (0, slice(1, 2, None))),),
+    ]
+
+    assert result == expected
+
+    old = ((4, 0, 0, 4), (1, 1))
+    new = ((4, 4), (2,))
+    result = list(intersect_chunks(old, new))
+
+    expected = [
+        (
+            ((0, slice(0, 4, None)), (0, slice(0, 1, None))),
+            ((0, slice(0, 4, None)), (1, slice(0, 1, None))),
+        ),
+        (
+            ((3, slice(0, 4, None)), (0, slice(0, 1, None))),
+            ((3, slice(0, 4, None)), (1, slice(0, 1, None))),
+        ),
+    ]
+
+    assert result == expected
+
+    old = ((4, 4), (2,))
+    new = ((2, 0, 0, 2, 4), (1, 1))
+    result = list(intersect_chunks(old, new))
+    expected = [
+        (((0, slice(0, 2, None)), (0, slice(0, 1, None))),),
+        (((0, slice(0, 2, None)), (0, slice(1, 2, None))),),
+        (((0, slice(2, 2, None)), (0, slice(0, 1, None))),),
+        (((0, slice(2, 2, None)), (0, slice(1, 2, None))),),
+        (((0, slice(2, 2, None)), (0, slice(0, 1, None))),),
+        (((0, slice(2, 2, None)), (0, slice(1, 2, None))),),
+        (((0, slice(2, 4, None)), (0, slice(0, 1, None))),),
+        (((0, slice(2, 4, None)), (0, slice(1, 2, None))),),
+        (((1, slice(0, 4, None)), (0, slice(0, 1, None))),),
+        (((1, slice(0, 4, None)), (0, slice(1, 2, None))),),
+    ]
+
+    assert result == expected
+
+    old = ((4, 4), (2,))
+    new = ((0, 0, 4, 4), (1, 1))
+    result = list(intersect_chunks(old, new))
+    expected = [
+        (((0, slice(0, 0, None)), (0, slice(0, 1, None))),),
+        (((0, slice(0, 0, None)), (0, slice(1, 2, None))),),
+        (((0, slice(0, 0, None)), (0, slice(0, 1, None))),),
+        (((0, slice(0, 0, None)), (0, slice(1, 2, None))),),
+        (((0, slice(0, 4, None)), (0, slice(0, 1, None))),),
+        (((0, slice(0, 4, None)), (0, slice(1, 2, None))),),
+        (((1, slice(0, 4, None)), (0, slice(0, 1, None))),),
+        (((1, slice(0, 4, None)), (0, slice(1, 2, None))),),
+    ]
+
+    assert result == expected
+
+
+def test_old_to_new_with_zero():
+    from dask.array.rechunk import old_to_new
+
+    old = ((4, 4),)
+    new = ((4, 0, 4),)
+    result = old_to_new(old, new)
+    expected = [[[(0, slice(0, 4))], [(1, slice(0, 0))], [(1, slice(0, 4))]]]
+    assert result == expected
+
+    old = ((4,),)
+    new = ((4, 0),)
+    result = old_to_new(old, new)
+    expected = [[[(0, slice(0, 4))], [(0, slice(4, 4))]]]
+    assert result == expected
+
+    old = ((4, 0, 4),)
+    new = ((4, 0, 2, 2),)
+    result = old_to_new(old, new)
+    expected = [
+        [[(0, slice(0, 4))], [(2, slice(0, 0))], [(2, slice(0, 2))], [(2, slice(2, 4))]]
+    ]
+    assert result == expected

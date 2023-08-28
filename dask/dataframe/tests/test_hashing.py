@@ -1,11 +1,13 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
-import pandas.util.testing as tm
-import dask.dataframe as dd
+import pytest
 from pandas.util import hash_pandas_object
 
-import pytest
-
+import dask.dataframe as dd
+from dask.dataframe import _compat
+from dask.dataframe._compat import tm
 from dask.dataframe.utils import assert_eq
 
 
@@ -20,11 +22,11 @@ from dask.dataframe.utils import assert_eq
         pd.Index([1, 2, 3]),
         pd.Index([True, False, True]),
         pd.DataFrame({"x": ["a", "b", "c"], "y": [1, 2, 3]}),
-        pd.util.testing.makeMissingDataframe(),
-        pd.util.testing.makeMixedDataFrame(),
-        pd.util.testing.makeTimeDataFrame(),
-        pd.util.testing.makeTimeSeries(),
-        pd.util.testing.makeTimedeltaIndex(),
+        _compat.makeMissingDataframe(),
+        _compat.makeMixedDataFrame(),
+        _compat.makeTimeDataFrame(),
+        _compat.makeTimeSeries(),
+        _compat.makeTimedeltaIndex(),
     ],
 )
 def test_hash_pandas_object(obj):
@@ -68,7 +70,7 @@ def test_object_missing_values():
     "obj",
     [
         pd.Index([1, 2, 3]),
-        pd.Index([True, False, True], index=[1.5, 1.1, 3.3]),
+        pd.Index([True, False, True]),
         pd.Series([1, 2, 3]),
         pd.Series([1.0, 1.5, 3.2]),
         pd.Series([1.0, 1.5, 3.2], index=[1.5, 1.1, 3.3]),
@@ -77,6 +79,6 @@ def test_object_missing_values():
     ],
 )
 def test_hash_object_dispatch(obj):
-    result = dd.utils.hash_object_dispatch(obj)
+    result = dd.dispatch.hash_object_dispatch(obj)
     expected = pd.util.hash_pandas_object(obj)
     assert_eq(result, expected)

@@ -1,20 +1,30 @@
+from __future__ import annotations
+
 from collections import defaultdict
-import pandas as pd
-from toolz import partition_all
 from numbers import Integral
 
-from ..base import tokenize, compute_as_if_collection
-from .accessor import Accessor
-from .utils import (
-    has_known_categories,
-    clear_known_categories,
-    is_scalar,
+import pandas as pd
+from pandas.api.types import is_scalar
+from tlz import partition_all
+
+from dask.base import compute_as_if_collection, tokenize
+from dask.dataframe import methods
+from dask.dataframe.accessor import Accessor
+from dask.dataframe.dispatch import (  # noqa: F401
+    categorical_dtype,
+    categorical_dtype_dispatch,
     is_categorical_dtype,
 )
+from dask.dataframe.utils import (
+    AttributeNotImplementedError,
+    clear_known_categories,
+    has_known_categories,
+)
+from dask.highlevelgraph import HighLevelGraph
 
 
 def _categorize_block(df, categories, index):
-    """ Categorize a dataframe with given categories
+    """Categorize a dataframe with given categories
 
     df: DataFrame
     categories: dict mapping column name to iterable of categories
@@ -24,12 +34,16 @@ def _categorize_block(df, categories, index):
         if is_categorical_dtype(df[col]):
             df[col] = df[col].cat.set_categories(vals)
         else:
-            df[col] = pd.Categorical(df[col], categories=vals, ordered=False)
+            cat_dtype = categorical_dtype(meta=df[col], categories=vals, ordered=False)
+            df[col] = df[col].astype(cat_dtype)
     if index is not None:
         if is_categorical_dtype(df.index):
             ind = df.index.set_categories(index)
         else:
-            ind = pd.Categorical(df.index, categories=index, ordered=False)
+            cat_dtype = categorical_dtype(
+                meta=df.index, categories=index, ordered=False
+            )
+            ind = df.index.astype(dtype=cat_dtype)
         ind.name = df.index.name
         df.index = ind
     return df
@@ -40,7 +54,7 @@ def _get_categories(df, columns, index):
     for col in columns:
         x = df[col]
         if is_categorical_dtype(x):
-            res[col] = pd.Series(x.cat.categories)
+            res[col] = x._constructor(x.cat.categories)
         else:
             res[col] = x.dropna().drop_duplicates()
     if index:
@@ -57,7 +71,10 @@ def _get_categories_agg(parts):
         for k, v in p[0].items():
             res[k].append(v)
         res_ind.append(p[1])
-    res = {k: pd.concat(v, ignore_index=True).drop_duplicates() for k, v in res.items()}
+    res = {
+        k: methods.concat(v, ignore_index=True).drop_duplicates()
+        for k, v in res.items()
+    }
     if res_ind[0] is None:
         return res, None
     return res, res_ind[0].append(res_ind[1:]).drop_duplicates()
@@ -85,7 +102,7 @@ def categorize(df, columns=None, index=None, split_every=None, **kwargs):
     """
     meta = df._meta
     if columns is None:
-        columns = list(meta.select_dtypes(["object", "category"]).columns)
+        columns = list(meta.select_dtypes(["object", "string", "category"]).columns)
     elif is_scalar(columns):
         columns = [columns]
 
@@ -100,7 +117,7 @@ def categorize(df, columns=None, index=None, split_every=None, **kwargs):
         if is_categorical_dtype(meta.index):
             index = not has_known_categories(meta.index)
         elif index is None:
-            index = meta.index.dtype == object
+            index = str(meta.index.dtype) in ("object", "string")
 
     # Nothing to do
     if not len(columns) and index is False:
@@ -132,10 +149,15 @@ def categorize(df, columns=None, index=None, split_every=None, **kwargs):
         depth += 1
 
     dsk[(prefix, 0)] = (_get_categories_agg, [(a, i) for i in range(k)])
-    dsk.update(df.dask)
+    graph = HighLevelGraph.from_collections(prefix, dsk, dependencies=[df])
 
     # Compute the categories
-    categories, index = compute_as_if_collection(type(df), dsk, (prefix, 0), **kwargs)
+    categories, index = compute_as_if_collection(
+        df.__class__, graph, (prefix, 0), **kwargs
+    )
+
+    # some operations like get_dummies() rely on the order of categories
+    categories = {k: v.sort_values() for k, v in categories.items()}
 
     # Categorize each partition
     return df.map_partitions(_categorize_block, categories, index)
@@ -166,6 +188,16 @@ class CategoricalAccessor(Accessor):
     """
 
     _accessor_name = "cat"
+    _accessor_methods = (
+        "add_categories",
+        "as_ordered",
+        "as_unordered",
+        "remove_categories",
+        "rename_categories",
+        "reorder_categories",
+        "set_categories",
+    )
+    _accessor_properties = ()
 
     @property
     def known(self):
@@ -199,6 +231,7 @@ class CategoricalAccessor(Accessor):
 
     @property
     def ordered(self):
+        """Whether the categories have an ordered relationship"""
         return self._delegate_property(self._series._meta, "cat", "ordered")
 
     @property
@@ -212,7 +245,7 @@ class CategoricalAccessor(Accessor):
                 "supported.  Please use `column.cat.as_known()` or "
                 "`df.categorize()` beforehand to ensure known categories"
             )
-            raise NotImplementedError(msg)
+            raise AttributeNotImplementedError(msg)
         return self._delegate_property(self._series._meta, "cat", "categories")
 
     @property
@@ -226,7 +259,7 @@ class CategoricalAccessor(Accessor):
                 "supported.  Please use `column.cat.as_known()` or "
                 "`df.categorize()` beforehand to ensure known categories"
             )
-            raise NotImplementedError(msg)
+            raise AttributeNotImplementedError(msg)
         return self._property_map("codes")
 
     def remove_unused_categories(self):

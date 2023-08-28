@@ -1,16 +1,20 @@
+from __future__ import annotations
+
+from collections.abc import Callable
 from itertools import zip_longest
-from operator import getitem
+from numbers import Integral
+from typing import Any
 
 import numpy as np
 
-from .core import getter, getter_nofancy, getter_inline
-from ..blockwise import optimize_blockwise
-from ..core import flatten, reverse_dict
-from ..optimization import cull, fuse, inline_functions
-from ..utils import ensure_dict
-from ..highlevelgraph import HighLevelGraph
-
-from numbers import Integral
+from dask import config
+from dask.array.chunk import getitem
+from dask.array.core import getter, getter_inline, getter_nofancy
+from dask.blockwise import fuse_roots, optimize_blockwise
+from dask.core import flatten, reverse_dict
+from dask.highlevelgraph import HighLevelGraph
+from dask.optimization import SubgraphCallable, fuse, inline_functions
+from dask.utils import ensure_dict
 
 # All get* functions the optimizations know about
 GETTERS = (getter, getter_nofancy, getter_inline, getitem)
@@ -27,50 +31,58 @@ def optimize(
     fast_functions=None,
     inline_functions_fast_functions=(getter_inline,),
     rename_fused_keys=True,
-    **kwargs
+    **kwargs,
 ):
-    """ Optimize dask for array computation
+    """Optimize dask for array computation
 
     1.  Cull tasks not necessary to evaluate keys
     2.  Remove full slicing, e.g. x[:]
     3.  Inline fast functions like getitem and np.transpose
     """
+    if not isinstance(keys, (list, set)):
+        keys = [keys]
     keys = list(flatten(keys))
 
-    # High level stage optimization
-    if isinstance(dsk, HighLevelGraph):
-        dsk = optimize_blockwise(dsk, keys=keys)
+    if not isinstance(dsk, HighLevelGraph):
+        dsk = HighLevelGraph.from_collections(id(dsk), dsk, dependencies=())
+
+    dsk = optimize_blockwise(dsk, keys=keys)
+    dsk = fuse_roots(dsk, keys=keys)
+    dsk = dsk.cull(set(keys))
+
+    # Perform low-level fusion unless the user has
+    # specified False explicitly.
+    if config.get("optimization.fuse.active") is False:
+        return dsk
+
+    dependencies = dsk.get_all_dependencies()
+    dsk = ensure_dict(dsk)
 
     # Low level task optimizations
-    dsk = ensure_dict(dsk)
     if fast_functions is not None:
         inline_functions_fast_functions = fast_functions
 
-    dsk2, dependencies = cull(dsk, keys)
-    hold = hold_keys(dsk2, dependencies)
+    hold = hold_keys(dsk, dependencies)
 
-    dsk3, dependencies = fuse(
-        dsk2,
+    dsk, dependencies = fuse(
+        dsk,
         hold + keys + (fuse_keys or []),
         dependencies,
         rename_keys=rename_fused_keys,
     )
     if inline_functions_fast_functions:
-        dsk4 = inline_functions(
-            dsk3,
+        dsk = inline_functions(
+            dsk,
             keys,
             dependencies=dependencies,
             fast_functions=inline_functions_fast_functions,
         )
-    else:
-        dsk4 = dsk3
-    dsk5 = optimize_slices(dsk4)
 
-    return dsk5
+    return optimize_slices(dsk)
 
 
 def hold_keys(dsk, dependencies):
-    """ Find keys to avoid fusion
+    """Find keys to avoid fusion
 
     We don't want to fuse data present in the graph because it is easier to
     serialize as a raw value.
@@ -90,14 +102,14 @@ def hold_keys(dsk, dependencies):
             # when there's either more than one dependent, or the dependent is
             # no longer a get* function or an alias. We then add the final
             # key to the list of keys not to fuse.
-            if type(task) is tuple and task and task[0] in GETTERS:
+            if _is_getter_task(task):
                 try:
                     while len(dependents[dep]) == 1:
                         new_dep = next(iter(dependents[dep]))
                         new_task = dsk[new_dep]
                         # If the task is a get* or an alias, continue up the
                         # linear chain
-                        if new_task[0] in GETTERS or new_task in dsk:
+                        if _is_getter_task(new_task) or new_task in dsk:
                             dep = new_dep
                         else:
                             break
@@ -107,8 +119,51 @@ def hold_keys(dsk, dependencies):
     return hold_keys
 
 
+def _is_getter_task(
+    value,
+) -> tuple[Callable, Any, Any, bool, bool | None] | None:
+    """Check if a value in a Dask graph looks like a getter.
+
+    1. Is it a tuple with the first element a known getter.
+    2. Is it a SubgraphCallable with a single element in its
+       dsk which is a known getter.
+
+    If a getter is found, it returns a tuple with (getter, array, index, asarray, lock).
+    Otherwise it returns ``None``.
+
+    TODO: the second check is a hack to allow for slice fusion between tasks produced
+    from blockwise layers and slicing operations. Once slicing operations have
+    HighLevelGraph layers which can talk to Blockwise layers this check *should* be
+    removed, and we should not have to introspect SubgraphCallables.
+    """
+    if type(value) is not tuple:
+        return None
+    first = value[0]
+    get: Callable | None = None
+    if first in GETTERS:
+        get = first
+    # We only accept SubgraphCallables with a single sub-task right now as it's
+    # not clear which task to inspect if there is more than one, or how to resolve
+    # conflicts if they occur.
+    elif isinstance(first, SubgraphCallable) and len(first.dsk) == 1:
+        v = next(iter(first.dsk.values()))
+        if type(v) is tuple and len(v) > 1 and v[0] in GETTERS:
+            get = v[0]
+    if get is None:  # Didn't find a getter
+        return None
+
+    length = len(value)
+    if length == 3:
+        # getter defaults to asarray=True, getitem is semantically False
+        return get, value[1], value[2], get is not getitem, None
+    elif length == 5:
+        return get, *value[1:]  # type: ignore
+
+    return None
+
+
 def optimize_slices(dsk):
-    """ Optimize slices
+    """Optimize slices
 
     1.  Fuse repeated slices, like x[5:][2:6] -> x[7:11]
     2.  Remove full slices, like         x[:] -> x
@@ -119,21 +174,11 @@ def optimize_slices(dsk):
     fancy_ind_types = (list, np.ndarray)
     dsk = dsk.copy()
     for k, v in dsk.items():
-        if type(v) is tuple and v[0] in GETTERS and len(v) in (3, 5):
-            if len(v) == 3:
-                get, a, a_index = v
-                # getter defaults to asarray=True, getitem is semantically False
-                a_asarray = get is not getitem
-                a_lock = None
-            else:
-                get, a, a_index, a_asarray, a_lock = v
-            while type(a) is tuple and a[0] in GETTERS and len(a) in (3, 5):
-                if len(a) == 3:
-                    f2, b, b_index = a
-                    b_asarray = f2 is not getitem
-                    b_lock = None
-                else:
-                    f2, b, b_index, b_asarray, b_lock = a
+        if a_task := _is_getter_task(v):
+            get, a, a_index, a_asarray, a_lock = a_task
+
+            while b_task := _is_getter_task(a):
+                f2, b, b_index, b_asarray, b_lock = b_task
 
                 if a_lock and a_lock is not b_lock:
                     break
@@ -195,7 +240,7 @@ def optimize_slices(dsk):
 
 
 def normalize_slice(s):
-    """ Replace Nones in slices with integers
+    """Replace Nones in slices with integers
 
     >>> normalize_slice(slice(None, None, None))
     slice(0, None, 1)
@@ -227,7 +272,7 @@ def check_for_nonfusible_fancy_indexing(fancy, normal):
 
 
 def fuse_slice(a, b):
-    """ Fuse stacked slices together
+    """Fuse stacked slices together
 
     Fuse a pair of repeated slices into a single slice:
 
@@ -296,7 +341,6 @@ def fuse_slice(a, b):
     # If given two tuples walk through both, being mindful of uneven sizes
     # and newaxes
     if isinstance(a, tuple) and isinstance(b, tuple):
-
         # Check for non-fusible cases with fancy-indexing
         a_has_lists = any(isinstance(item, list) for item in a)
         b_has_lists = any(isinstance(item, list) for item in b)

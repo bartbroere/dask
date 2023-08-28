@@ -1,12 +1,12 @@
-from itertools import chain
+from __future__ import annotations
 
-from .utils_test import add, inc  # noqa: F401
+from collections import defaultdict
 
 no_default = "__no_default__"
 
 
 def ishashable(x):
-    """ Is x hashable?
+    """Is x hashable?
 
     Examples
     --------
@@ -24,7 +24,7 @@ def ishashable(x):
 
 
 def istask(x):
-    """ Is x a runnable task?
+    """Is x a runnable task?
 
     A task is a tuple with a callable first argument
 
@@ -67,12 +67,10 @@ def preorder_traversal(task):
 
     for item in task:
         if istask(item):
-            for i in preorder_traversal(item):
-                yield i
+            yield from preorder_traversal(item)
         elif isinstance(item, list):
             yield list
-            for i in preorder_traversal(item):
-                yield i
+            yield from preorder_traversal(item)
         else:
             yield item
 
@@ -84,11 +82,13 @@ def lists_to_tuples(res, keys):
 
 
 def _execute_task(arg, cache, dsk=None):
-    """ Do the actual work of collecting data and executing a function
+    """Do the actual work of collecting data and executing a function
 
     Examples
     --------
 
+    >>> inc = lambda x: x + 1
+    >>> add = lambda x, y: x + y
     >>> cache = {'x': 1, 'y': 2}
 
     Compute tasks against a cache
@@ -115,8 +115,10 @@ def _execute_task(arg, cache, dsk=None):
         return [_execute_task(a, cache) for a in arg]
     elif istask(arg):
         func, args = arg[0], arg[1:]
-        args2 = [_execute_task(a, cache) for a in args]
-        return func(*args2)
+        # Note: Don't assign the subtask results to a variable. numpy detects
+        # temporaries by their reference count and can execute certain
+        # operations in-place.
+        return func(*(_execute_task(a, cache) for a in args))
     elif not ishashable(arg):
         return arg
     elif arg in cache:
@@ -126,7 +128,7 @@ def _execute_task(arg, cache, dsk=None):
 
 
 def get(dsk, out, cache=None):
-    """ Get value from Dask
+    """Get value from Dask
 
     Examples
     --------
@@ -141,7 +143,7 @@ def get(dsk, out, cache=None):
     """
     for k in flatten(out) if isinstance(out, list) else [out]:
         if k not in dsk:
-            raise KeyError("{0} is not a key in the graph".format(k))
+            raise KeyError(f"{k} is not a key in the graph")
     if cache is None:
         cache = {}
     for key in toposort(dsk):
@@ -154,11 +156,78 @@ def get(dsk, out, cache=None):
     return result
 
 
-def get_dependencies(dsk, key=None, task=no_default, as_list=False):
-    """ Get the immediate tasks on which this task depends
+def keys_in_tasks(keys, tasks, as_list=False):
+    """Returns the keys in `keys` that are also in `tasks`
 
     Examples
     --------
+    >>> inc = lambda x: x + 1
+    >>> add = lambda x, y: x + y
+    >>> dsk = {'x': 1,
+    ...        'y': (inc, 'x'),
+    ...        'z': (add, 'x', 'y'),
+    ...        'w': (inc, 'z'),
+    ...        'a': (add, (inc, 'x'), 1)}
+
+    >>> keys_in_tasks(dsk, ['x', 'y', 'j'])  # doctest: +SKIP
+    {'x', 'y'}
+    """
+    ret = []
+    while tasks:
+        work = []
+        for w in tasks:
+            typ = type(w)
+            if typ is tuple and w and callable(w[0]):  # istask(w)
+                work.extend(w[1:])
+            elif typ is list:
+                work.extend(w)
+            elif typ is dict:
+                work.extend(w.values())
+            else:
+                try:
+                    if w in keys:
+                        ret.append(w)
+                except TypeError:  # not hashable
+                    pass
+        tasks = work
+    return ret if as_list else set(ret)
+
+
+def find_all_possible_keys(tasks) -> set:
+    """Returns all possible keys in `tasks` including hashable literals.
+
+    The definition of a key in a Dask graph is any hashable object
+    that is not a task. This function returns all such objects in
+    `tasks` even if the object is in fact a literal.
+
+    """
+    ret = set()
+    while tasks:
+        work = []
+        for w in tasks:
+            typ = type(w)
+            if typ is tuple and w and callable(w[0]):  # istask(w)
+                work.extend(w[1:])
+            elif typ is list:
+                work.extend(w)
+            elif typ is dict:
+                work.extend(w.values())
+            else:
+                try:
+                    ret.add(w)
+                except TypeError:  # not hashable
+                    pass
+        tasks = work
+    return ret
+
+
+def get_dependencies(dsk, key=None, task=no_default, as_list=False):
+    """Get the immediate tasks on which this task depends
+
+    Examples
+    --------
+    >>> inc = lambda x: x + 1
+    >>> add = lambda x, y: x + y
     >>> dsk = {'x': 1,
     ...        'y': (inc, 'x'),
     ...        'z': (add, 'x', 'y'),
@@ -190,38 +259,18 @@ def get_dependencies(dsk, key=None, task=no_default, as_list=False):
     else:
         raise ValueError("Provide either key or task")
 
-    result = []
-    work = [arg]
-
-    while work:
-        new_work = []
-        for w in work:
-            typ = type(w)
-            if typ is tuple and w and callable(w[0]):  # istask(w)
-                new_work += w[1:]
-            elif typ is list:
-                new_work += w
-            elif typ is dict:
-                new_work += w.values()
-            else:
-                try:
-                    if w in dsk:
-                        result.append(w)
-                except TypeError:  # not hashable
-                    pass
-        work = new_work
-
-    return result if as_list else set(result)
+    return keys_in_tasks(dsk, [arg], as_list=as_list)
 
 
 def get_deps(dsk):
-    """ Get dependencies and dependents from dask dask graph
+    """Get dependencies and dependents from dask dask graph
 
+    >>> inc = lambda x: x + 1
     >>> dsk = {'a': 1, 'b': (inc, 'a'), 'c': (inc, 'b')}
     >>> dependencies, dependents = get_deps(dsk)
     >>> dependencies
     {'a': set(), 'b': {'a'}, 'c': {'b'}}
-    >>> dependents
+    >>> dependents  # doctest: +SKIP
     {'a': {'b'}, 'b': {'c'}, 'c': set()}
     """
     dependencies = {k: get_dependencies(dsk, task=v) for k, v in dsk.items()}
@@ -252,8 +301,7 @@ def flatten(seq, container=list):
     else:
         for item in seq:
             if isinstance(item, container):
-                for item2 in flatten(item, container=container):
-                    yield item2
+                yield from flatten(item, container=container)
             else:
                 yield item
 
@@ -266,22 +314,26 @@ def reverse_dict(d):
     >>> reverse_dict(d)  # doctest: +SKIP
     {'a': set([]), 'b': set(['a']}, 'c': set(['a', 'b'])}
     """
-    terms = list(d.keys()) + list(chain.from_iterable(d.values()))
-    result = {t: set() for t in terms}
+    result = defaultdict(set)
+    _add = set.add
     for k, vals in d.items():
+        result[k]
         for val in vals:
-            result[val].add(k)
+            _add(result[val], k)
+    result.default_factory = None
     return result
 
 
 def subs(task, key, val):
-    """ Perform a substitution on a task
+    """Perform a substitution on a task
 
     Examples
     --------
+    >>> def inc(x):
+    ...     return x + 1
 
-    >>> subs((inc, 'x'), 'x', 1)  # doctest: +SKIP
-    (inc, 1)
+    >>> subs((inc, 'x'), 'x', 1)  # doctest: +ELLIPSIS
+    (<function inc at ...>, 1)
     """
     type_task = type(task)
     if not (type_task is tuple and task and callable(task[0])):  # istask(task):
@@ -294,26 +346,19 @@ def subs(task, key, val):
             return [subs(x, key, val) for x in task]
         return task
     newargs = []
+    hash_key = {key}
     for arg in task[1:]:
         type_arg = type(arg)
         if type_arg is tuple and arg and callable(arg[0]):  # istask(task):
             arg = subs(arg, key, val)
         elif type_arg is list:
             arg = [subs(x, key, val) for x in arg]
-        elif type_arg is type(key):
+        else:
             try:
-                # Can't do a simple equality check, since this may trigger
-                # a FutureWarning from NumPy about array equality
-                # https://github.com/dask/dask/pull/2457
-                if len(arg) == len(key) and all(
-                    type(aa) == type(bb) and aa == bb for aa, bb in zip(arg, key)
-                ):
+                if arg in hash_key:  # Hash and equality match
                     arg = val
-
-            except (TypeError, AttributeError):
-                # Handle keys which are not sized (len() fails), but are hashable
-                if arg == key:
-                    arg = val
+            except TypeError:  # not hashable
+                pass
         newargs.append(arg)
     return task[:1] + tuple(newargs)
 
@@ -340,7 +385,7 @@ def _toposort(dsk, keys=None, returncycle=False, dependencies=None):
     seen = set()
 
     if dependencies is None:
-        dependencies = dict((k, get_dependencies(dsk, k)) for k in dsk)
+        dependencies = {k: get_dependencies(dsk, k) for k in dsk}
 
     for key in keys:
         if key in completed:
@@ -361,11 +406,33 @@ def _toposort(dsk, keys=None, returncycle=False, dependencies=None):
                 if nxt not in completed:
                     if nxt in seen:
                         # Cycle detected!
-                        cycle = [nxt]
+                        # Let's report only the nodes that directly participate in the cycle.
+                        # We use `priorities` below to greedily construct a short cycle.
+                        # Shorter cycles may exist.
+                        priorities = {}
+                        prev = nodes[-1]
+                        # Give priority to nodes that were seen earlier.
                         while nodes[-1] != nxt:
-                            cycle.append(nodes.pop())
-                        cycle.append(nodes.pop())
+                            priorities[nodes.pop()] = -len(priorities)
+                        priorities[nxt] = -len(priorities)
+                        # We're going to get the cycle by walking backwards along dependents,
+                        # so calculate dependents only for the nodes in play.
+                        inplay = set(priorities)
+                        dependents = reverse_dict(
+                            {k: inplay.intersection(dependencies[k]) for k in inplay}
+                        )
+                        # Begin with the node that was seen twice and the node `prev` from
+                        # which we detected the cycle.
+                        cycle = [nodes.pop()]
+                        cycle.append(prev)
+                        while prev != cycle[0]:
+                            # Greedily take a step that takes us closest to completing the cycle.
+                            # This may not give us the shortest cycle, but we get *a* short cycle.
+                            deps = dependents[cycle[-1]]
+                            prev = min(deps, key=priorities.__getitem__)
+                            cycle.append(prev)
                         cycle.reverse()
+
                         if returncycle:
                             return cycle
                         else:
@@ -388,12 +455,12 @@ def _toposort(dsk, keys=None, returncycle=False, dependencies=None):
 
 
 def toposort(dsk, dependencies=None):
-    """ Return a list of keys of dask sorted in topological order."""
+    """Return a list of keys of dask sorted in topological order."""
     return _toposort(dsk, dependencies=dependencies)
 
 
 def getcycle(d, keys):
-    """ Return a list of nodes that form a cycle if Dask is not a DAG.
+    """Return a list of nodes that form a cycle if Dask is not a DAG.
 
     Returns an empty list if no cycle is found.
 
@@ -402,6 +469,7 @@ def getcycle(d, keys):
     Examples
     --------
 
+    >>> inc = lambda x: x + 1
     >>> d = {'x': (inc, 'z'), 'y': (inc, 'x'), 'z': (inc, 'y')}
     >>> getcycle(d, 'x')
     ['x', 'z', 'y', 'x']
@@ -414,13 +482,14 @@ def getcycle(d, keys):
 
 
 def isdag(d, keys):
-    """ Does Dask form a directed acyclic graph when calculating keys?
+    """Does Dask form a directed acyclic graph when calculating keys?
 
     ``keys`` may be a single key or list of keys.
 
     Examples
     --------
 
+    >>> inc = lambda x: x + 1
     >>> inc = lambda x: x + 1
     >>> isdag({'x': 0, 'y': (inc, 'x')}, 'y')
     True
@@ -434,7 +503,7 @@ def isdag(d, keys):
     return not getcycle(d, keys)
 
 
-class literal(object):
+class literal:
     """A small serializable object to wrap literal values without copying"""
 
     __slots__ = ("data",)
@@ -453,14 +522,15 @@ class literal(object):
 
 
 def quote(x):
-    """ Ensure that this value remains this value in a dask graph
+    """Ensure that this value remains this value in a dask graph
 
     Some values in dask graph take on special meaning. Sometimes we want to
     ensure that our data is not interpreted but remains literal.
 
-    >>> quote((add, 1, 2))  # doctest: +SKIP
+    >>> add = lambda x, y: x + y
+    >>> quote((add, 1, 2))
     (literal<type=tuple>,)
     """
-    if istask(x) or type(x) is list:
+    if istask(x) or type(x) is list or type(x) is dict:
         return (literal(x),)
     return x

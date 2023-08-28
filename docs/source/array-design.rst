@@ -4,10 +4,10 @@ Internal Design
 Overview
 --------
 
-.. image:: images/array.png
+.. image:: images/array.svg
    :width: 40 %
    :align: right
-   :alt: A dask array
+   :alt: 12 rectangular blocks arranged as a 4-row, 3-column layout. Each block includes 'x' and its location in the table starting with ('x',0,0) in the top-left, and a size of 5x8.
 
 Dask arrays define a large array with a grid of blocks of smaller arrays.
 These arrays may be actual arrays or functions that produce arrays. We 
@@ -33,7 +33,10 @@ Example
    >>> x.name
    'arange-539766a'
 
-   >>> x.dask  # somewhat simplified
+   >>> x.__dask_graph__()
+   <dask.highlevelgraph.HighLevelGraph at 0x7f9f6f686d68>
+
+   >>> dict(x.__dask_graph__())  # somewhat simplified
    {('arange-539766a', 0): (np.arange, 0, 5),
     ('arange-539766a', 1): (np.arange, 5, 10),
     ('arange-539766a', 2): (np.arange, 10, 15)}
@@ -51,8 +54,10 @@ Keys of the Dask graph
 By special convention, we refer to each block of the array with a tuple of the
 form ``(name, i, j, k)``, with ``i, j, k`` being the indices of the block
 ranging from ``0`` to the number of blocks in that dimension.  The Dask graph
-must hold key-value pairs referring to these keys.  Moreover, it likely also 
-holds other key-value pairs required to eventually compute the desired values:
+must hold key-value pairs referring to these keys.  Moreover, it likely also
+holds other key-value pairs required to eventually compute the desired values
+(usually organised in a :doc:`HighLevelGraph <high-level-graphs>`, but shown
+in a flattened form here for illustration):
 
 .. code-block:: python
 
@@ -100,13 +105,40 @@ Some ways in which ``chunks`` reflects properties of our array:
        ('x', 1, 0), ('x', 1, 1), ('x', 1, 2)
 
 
+Metadata
+--------
+
+Many Array operations rely on knowing the dtype (int, float,..) and type (numpy, cupy,...).  To
+keep track of this information, all Dask Array objects have a ``_meta``
+attribute which contains an empty Numpy object with the same dtypes.
+For example:
+
+.. code-block:: python
+
+   >>> np_array = np.arange(15).reshape(3, 5)
+   >>> da_array = da.from_array(np_array, npartitions=2)
+   >>> da_array._meta
+   Empty Array
+   Shape: (0, 0)
+   dtype: int64
+   array([], shape=(0, 0), dtype=int64)
+
+   >>> ddf._meta.dtype
+   dtype: int64
+
+Internally, Dask Array does its best to propagate this information
+through all operations, so most of the time a user shouldn't have to worry
+about this. 
+
+
 Create an Array Object
 ----------------------
 
-In order to create an ``da.Array`` object we need a dictionary with these special
+In order to create an ``da.Array`` object we need a graph with these special
 keys::
 
-    dsk = {('x', 0, 0): ...}
+    layer = {('x', 0, 0): ...}
+    dsk = HighLevelGraph.from_collections('x', layer, dependencies=())
 
 a name specifying which keys this array refers to::
 
@@ -127,7 +159,7 @@ shapes.
 Example - ``eye`` function
 --------------------------
 
-As an example, lets build the ``np.eye`` function for ``dask.array`` to make the
+As an example, let's build the ``np.eye`` function for ``dask.array`` to make the
 identity matrix:
 
 .. code-block:: python
@@ -138,11 +170,12 @@ identity matrix:
 
        name = 'eye' + next(tokens)  # unique identifier
 
-       dsk = {(name, i, j): (np.eye, blocksize)
-                            if i == j else
-                            (np.zeros, (blocksize, blocksize))
+       layer = {(name, i, j): (np.eye, blocksize)
+                              if i == j else
+                              (np.zeros, (blocksize, blocksize))
                 for i in range(n // blocksize)
                 for j in range(n // blocksize)}
+       dsk = dask.highlevelgraph.HighLevelGraph.from_collections(name, layer, dependencies=())
 
        dtype = np.eye(0).dtype  # take dtype default from numpy
 

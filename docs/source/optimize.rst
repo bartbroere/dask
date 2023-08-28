@@ -1,3 +1,5 @@
+.. _optimization:
+
 Optimization
 ============
 
@@ -34,15 +36,13 @@ Suppose you had a custom Dask graph for doing a word counting task:
 
 .. code-block:: python
 
-    >>> from __future__ import print_function
-
     >>> def print_and_return(string):
     ...     print(string)
     ...     return string
 
     >>> def format_str(count, val, nwords):
-    ...     return ('word list has {0} occurrences of {1}, '
-    ...             'out of {2} words').format(count, val, nwords)
+    ...     return (f'word list has {count} occurrences of '
+    ...             f'{val}, out of {nwords} words')
 
     >>> dsk = {'words': 'apple orange apple pear orange pear pear',
     ...        'nwords': (len, (str.split, 'words')),
@@ -52,16 +52,16 @@ Suppose you had a custom Dask graph for doing a word counting task:
     ...        'count1': (str.count, 'words', 'val1'),
     ...        'count2': (str.count, 'words', 'val2'),
     ...        'count3': (str.count, 'words', 'val3'),
-    ...        'out1': (format_str, 'count1', 'val1', 'nwords'),
-    ...        'out2': (format_str, 'count2', 'val2', 'nwords'),
-    ...        'out3': (format_str, 'count3', 'val3', 'nwords'),
-    ...        'print1': (print_and_return, 'out1'),
-    ...        'print2': (print_and_return, 'out2'),
-    ...        'print3': (print_and_return, 'out3')}
+    ...        'format1': (format_str, 'count1', 'val1', 'nwords'),
+    ...        'format2': (format_str, 'count2', 'val2', 'nwords'),
+    ...        'format3': (format_str, 'count3', 'val3', 'nwords'),
+    ...        'print1': (print_and_return, 'format1'),
+    ...        'print2': (print_and_return, 'format2'),
+    ...        'print3': (print_and_return, 'format3')}
 
-.. image:: images/optimize_dask1.png
+.. image:: images/optimize_dask1.svg
    :width: 65 %
-   :alt: The original dask graph
+   :alt: The original non-optimized Dask task graph.
 
 Here we are counting the occurrence of the words ``'orange``, ``'apple'``, and
 ``'pear'`` in the list of words, formatting an output string reporting the
@@ -77,15 +77,11 @@ output keys to a scheduler ``get`` function:
     >>> from dask.optimization import cull
 
     >>> outputs = ['print1', 'print2']
-    >>> dsk2, _ = cull(dsk, outputs)  # remove unnecessary tasks from the graph
+    >>> dsk1, dependencies = cull(dsk, outputs)  # remove unnecessary tasks from the graph
 
-    >>> results = get(dsk2, outputs)
+    >>> results = get(dsk1, outputs)
     word list has 2 occurrences of apple, out of 7 words
     word list has 2 occurrences of orange, out of 7 words
-
-    >>> results
-    ('word list has 2 occurrences of orange, out of 7 words',
-     'word list has 2 occurrences of apple, out of 7 words')
 
 As can be seen above, the scheduler computed only the requested outputs
 (``'print3'`` was never computed). This is because we called the
@@ -99,11 +95,12 @@ later steps:
 .. code-block:: python
 
     >>> from dask.optimization import cull
+    >>> outputs = ['print1', 'print2']
     >>> dsk1, dependencies = cull(dsk, outputs)
 
-.. image:: images/optimize_dask2.png
-   :width: 60 %
-   :alt: After culling
+.. image:: images/optimize_dask2.svg
+   :width: 50 %
+   :alt: The Dask task graph after culling tasks for optimization.
 
 Looking at the task graph above, there are multiple accesses to constants such
 as ``'val1'`` or ``'val2'`` in the Dask graph. These can be inlined into the
@@ -117,9 +114,9 @@ tasks to improve efficiency using the ``inline`` function. For example:
     word list has 2 occurrences of apple, out of 7 words
     word list has 2 occurrences of orange, out of 7 words
 
-.. image:: images/optimize_dask3.png
+.. image:: images/optimize_dask3.svg
    :width: 40 %
-   :alt: After inlining
+   :alt: The Dask task graph after inlining for optimization.
 
 Now we have two sets of *almost* linear task chains. The only link between them
 is the word counting function. For cheap operations like this, the
@@ -137,9 +134,9 @@ can be used:
     word list has 2 occurrences of apple, out of 7 words
     word list has 2 occurrences of orange, out of 7 words
 
-.. image:: images/optimize_dask4.png
-   :width: 40 %
-   :alt: After inlining functions
+.. image:: images/optimize_dask4.svg
+   :width: 30 %
+   :alt: The Dask task graph after inlining functions for optimization.
 
 Now we have a set of purely linear tasks. We'd like to have the scheduler run
 all of these on the same worker to reduce data serialization between workers.
@@ -154,9 +151,9 @@ One option is just to merge these linear chains into one big task using the
     word list has 2 occurrences of apple, out of 7 words
     word list has 2 occurrences of orange, out of 7 words
 
-.. image:: images/optimize_dask5.png
-   :width: 40 %
-   :alt: After fusing
+.. image:: images/optimize_dask5.svg
+   :width: 30 %
+   :alt: The Dask task graph after fusing tasks for optimization.
 
 
 Putting it all together:

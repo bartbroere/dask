@@ -66,7 +66,6 @@ several options:
       specifies a DataFrame. Note that order is important: the order of the
       names in ``meta`` should match the order of the columns
     * A tuple of ``(name, dtype)`` specifies a series
-    * A dtype object or string (e.g. ``'f8'``) specifies a scalar
 
 This keyword is available on all functions/methods that take user provided
 callables (e.g. ``DataFrame.map_partitions``, ``DataFrame.apply``, etc...), as
@@ -119,3 +118,22 @@ divided.  In this case ``.divisions`` will be all ``None``:
 In these cases, any operation that requires a cleanly partitioned DataFrame with
 known divisions will have to perform a sort.  This can generally achieved by
 calling ``df.set_index(...)``.
+
+
+.. _dataframe-design-groupby:
+
+Groupby
+-------
+
+By default, groupby methods return an object with only 1 partition. This is to
+optimize performance, and assumes the groupby reduction returns an object that
+is small enough to fit into memory. If your returned object is larger than this,
+you can increase the number of output partitions using the `split_out` argument.
+
+.. code-block:: python
+
+   result = df.groupby('id').value.mean()
+   result.npartitions  # returns 1
+
+   result = df.groupby('id').value.mean(split_out=8)
+   result.npartitions  # returns 8

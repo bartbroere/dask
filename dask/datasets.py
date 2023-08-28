@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import random
 
-from .utils import import_required
+from packaging.version import Version
+
+from dask.utils import import_required
 
 
 def timeseries(
@@ -8,11 +12,11 @@ def timeseries(
     end="2000-01-31",
     freq="1s",
     partition_freq="1d",
-    dtypes={"name": str, "id": int, "x": float, "y": float},
+    dtypes=None,
     seed=None,
-    **kwargs
+    **kwargs,
 ):
-    """ Create timeseries dataframe with random data
+    """Create timeseries dataframe with random data
 
     Parameters
     ----------
@@ -20,7 +24,7 @@ def timeseries(
         Start of time series
     end : datetime (or datetime-like string)
         End of time series
-    dtypes : dict
+    dtypes : dict (optional)
         Mapping of column names to types.
         Valid types include {float, int, str, 'category'}
     freq : string
@@ -53,6 +57,9 @@ def timeseries(
     """
     from dask.dataframe.io.demo import make_timeseries
 
+    if dtypes is None:
+        dtypes = {"name": str, "id": int, "x": float, "y": float}
+
     return make_timeseries(
         start=start,
         end=end,
@@ -60,23 +67,30 @@ def timeseries(
         partition_freq=partition_freq,
         seed=seed,
         dtypes=dtypes,
-        **kwargs
+        **kwargs,
     )
 
 
 def _generate_mimesis(field, schema_description, records_per_partition, seed):
-    """ Generate data for a single partition of a dask bag
+    """Generate data for a single partition of a dask bag
 
     See Also
     --------
     _make_mimesis
     """
-    from mimesis.schema import Schema, Field
+    import mimesis
+    from mimesis.schema import Field, Schema
 
     field = Field(seed=seed, **field)
-    schema = Schema(schema=lambda: schema_description(field))
-    for i in range(records_per_partition):
-        yield schema.create(iterations=1)[0]
+    # `iterations=` kwarg moved from `Schema.create()` to `Schema.__init__()`
+    # starting with `mimesis=9`.
+    schema_kwargs, create_kwargs = {}, {}
+    if Version(mimesis.__version__) < Version("9.0.0"):
+        create_kwargs["iterations"] = 1
+    else:
+        schema_kwargs["iterations"] = 1
+    schema = Schema(schema=lambda: schema_description(field), **schema_kwargs)
+    return [schema.create(**create_kwargs)[0] for i in range(records_per_partition)]
 
 
 def _make_mimesis(field, schema, npartitions, records_per_partition, seed=None):
@@ -107,10 +121,8 @@ def _make_mimesis(field, schema, npartitions, records_per_partition, seed=None):
 
     field = field or {}
 
-    if seed is None:
-        seed = random.random()
-
-    seeds = db.core.random_state_data_python(npartitions, seed)
+    random_state = random.Random(seed)
+    seeds = [random_state.randint(0, 1 << 32) for _ in range(npartitions)]
 
     name = "mimesis-" + tokenize(
         field, schema, npartitions, records_per_partition, seed
@@ -124,13 +136,13 @@ def _make_mimesis(field, schema, npartitions, records_per_partition, seed=None):
 
 
 def make_people(npartitions=10, records_per_partition=1000, seed=None, locale="en"):
-    """ Make a dataset of random people
+    """Make a dataset of random people
 
     This makes a Dask Bag with dictionary records of randomly generated people.
     This requires the optional library ``mimesis`` to generate records.
 
-    Paramters
-    ---------
+    Parameters
+    ----------
     npartitions : int
         Number of partitions
     records_per_partition : int
@@ -147,7 +159,7 @@ def make_people(npartitions=10, records_per_partition=1000, seed=None, locale="e
     import_required(
         "mimesis",
         "The mimesis module is required for this function.  Try:\n"
-        "  pip install mimesis",
+        "  python -m pip install mimesis",
     )
 
     schema = lambda field: {

@@ -1,10 +1,14 @@
-from dask.callbacks import Callback
-from dask.cache import Cache
-from dask.local import get_sync
-from dask.threaded import get
+from __future__ import annotations
+
 from operator import add
 from time import sleep
+
 import pytest
+
+from dask.cache import Cache
+from dask.callbacks import Callback
+from dask.local import get_sync
+from dask.threaded import get
 
 cachey = pytest.importorskip("cachey")
 

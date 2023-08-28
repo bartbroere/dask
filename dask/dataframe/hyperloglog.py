@@ -1,4 +1,4 @@
-u"""Implementation of HyperLogLog
+"""Implementation of HyperLogLog
 
 This implements the HyperLogLog algorithm for cardinality estimation, found
 in
@@ -9,6 +9,8 @@ in
         (2007)
 
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from pandas.util import hash_pandas_object
@@ -18,7 +20,7 @@ def compute_first_bit(a):
     "Compute the position of the first nonzero bit for each int in an array."
     # TODO: consider making this less memory-hungry
     bits = np.bitwise_and.outer(a, 1 << np.arange(32))
-    bits = bits.cumsum(axis=1).astype(np.bool)
+    bits = bits.cumsum(axis=1).astype(bool)
     return 33 - bits.sum(axis=1)
 
 
@@ -66,7 +68,7 @@ def estimate_count(Ms, b):
 
     # Estimate cardinality, no adjustments
     alpha = 0.7213 / (1 + 1.079 / m)
-    E = alpha * m / (2.0 ** -M.astype("f8")).sum() * m
+    E = alpha * m / (2.0 ** -(M.astype("f8"))).sum() * m
     #                        ^^^^ starts as unsigned, need a signed type for
     #                             negation operator to do something useful
 
@@ -75,6 +77,6 @@ def estimate_count(Ms, b):
         V = (M == 0).sum()
         if V:
             return m * np.log(m / V)
-    if E > 2 ** 32 / 30.0:
-        return -2 ** 32 * np.log1p(-E / 2 ** 32)
+    if E > 2**32 / 30.0:
+        return -(2**32) * np.log1p(-E / 2**32)
     return E

@@ -1,20 +1,15 @@
 """ A set of NumPy functions to apply per chunk """
+from __future__ import annotations
+
+import contextlib
 from collections.abc import Container, Iterable, Sequence
 from functools import wraps
-
-from toolz import concat
-import numpy as np
-from . import numpy_compat as npcompat
-
-from ..core import flatten
-from ..utils import ignoring
-
 from numbers import Integral
 
-try:
-    from numpy import take_along_axis
-except ImportError:  # pragma: no cover
-    take_along_axis = npcompat.take_along_axis
+import numpy as np
+from tlz import concat
+
+from dask.core import flatten
 
 
 def keepdims_wrapper(a_callable):
@@ -24,7 +19,7 @@ def keepdims_wrapper(a_callable):
 
     @wraps(a_callable)
     def keepdims_wrapped_callable(x, axis=None, keepdims=None, *args, **kwargs):
-        r = a_callable(x, axis=axis, *args, **kwargs)
+        r = a_callable(x, *args, axis=axis, **kwargs)
 
         if not keepdims:
             return r
@@ -72,22 +67,22 @@ nanmin = np.nanmin
 nanmax = np.nanmax
 mean = np.mean
 
-with ignoring(AttributeError):
+with contextlib.suppress(AttributeError):
     nanmean = np.nanmean
 
 var = np.var
 
-with ignoring(AttributeError):
+with contextlib.suppress(AttributeError):
     nanvar = np.nanvar
 
 std = np.std
 
-with ignoring(AttributeError):
+with contextlib.suppress(AttributeError):
     nanstd = np.nanstd
 
 
-def coarsen(reduction, x, axes, trim_excess=False):
-    """ Coarsen array by applying reduction to fixed size neighborhoods
+def coarsen(reduction, x, axes, trim_excess=False, **kwargs):
+    """Coarsen array by applying reduction to fixed size neighborhoods
 
     Parameters
     ----------
@@ -140,11 +135,11 @@ def coarsen(reduction, x, axes, trim_excess=False):
     # (10, 10) -> (5, 2, 5, 2)
     newshape = tuple(concat([(x.shape[i] // axes[i], axes[i]) for i in range(x.ndim)]))
 
-    return reduction(x.reshape(newshape), axis=tuple(range(1, x.ndim * 2, 2)))
+    return reduction(x.reshape(newshape), axis=tuple(range(1, x.ndim * 2, 2)), **kwargs)
 
 
 def trim(x, axes=None):
-    """ Trim boundaries off of array
+    """Trim boundaries off of array
 
     >>> x = np.arange(24).reshape((4, 6))
     >>> trim(x, axes={0: 0, 1: 1})
@@ -166,7 +161,7 @@ def trim(x, axes=None):
 
 
 def topk(a, k, axis, keepdims):
-    """ Chunk and combine function of topk
+    """Chunk and combine function of topk
 
     Extract the k largest elements from a on the given axis.
     If k is negative, extract the -k smallest elements instead.
@@ -184,7 +179,7 @@ def topk(a, k, axis, keepdims):
 
 
 def topk_aggregate(a, k, axis, keepdims):
-    """ Final aggregation function of topk
+    """Final aggregation function of topk
 
     Invoke topk one final time and then sort the results internally.
     """
@@ -202,7 +197,7 @@ def topk_aggregate(a, k, axis, keepdims):
 
 
 def argtopk_preprocess(a, idx):
-    """ Preparatory step for argtopk
+    """Preparatory step for argtopk
 
     Put data together with its original indices in a tuple.
     """
@@ -210,7 +205,7 @@ def argtopk_preprocess(a, idx):
 
 
 def argtopk(a_plus_idx, k, axis, keepdims):
-    """ Chunk and combine function of argtopk
+    """Chunk and combine function of argtopk
 
     Extract the indices of the k largest elements from a on the given axis.
     If k is negative, extract the indices of the -k smallest elements instead.
@@ -235,21 +230,22 @@ def argtopk(a_plus_idx, k, axis, keepdims):
     idx2 = np.argpartition(a, -k, axis=axis)
     k_slice = slice(-k, None) if k > 0 else slice(-k)
     idx2 = idx2[tuple(k_slice if i == axis else slice(None) for i in range(a.ndim))]
-    return take_along_axis(a, idx2, axis), take_along_axis(idx, idx2, axis)
+    return np.take_along_axis(a, idx2, axis), np.take_along_axis(idx, idx2, axis)
 
 
 def argtopk_aggregate(a_plus_idx, k, axis, keepdims):
-    """ Final aggregation function of argtopk
+    """Final aggregation function of argtopk
 
     Invoke argtopk one final time, sort the results internally, drop the data
     and return the index only.
     """
     assert keepdims is True
+    a_plus_idx = a_plus_idx if len(a_plus_idx) > 1 else a_plus_idx[0]
     a, idx = argtopk(a_plus_idx, k, axis, keepdims)
     axis = axis[0]
 
     idx2 = np.argsort(a, axis=axis)
-    idx = take_along_axis(idx, idx2, axis)
+    idx = np.take_along_axis(idx, idx2, axis)
     if k < 0:
         return idx
     return idx[
@@ -259,9 +255,23 @@ def argtopk_aggregate(a_plus_idx, k, axis, keepdims):
     ]
 
 
-def arange(start, stop, step, length, dtype):
-    res = np.arange(start, stop, step, dtype)
+def arange(start, stop, step, length, dtype, like=None):
+    from dask.array.utils import arange_safe
+
+    res = arange_safe(start, stop, step, dtype, like=like)
     return res[:-1] if len(res) > length else res
+
+
+def linspace(start, stop, num, endpoint=True, dtype=None):
+    from dask.array.core import Array
+
+    if isinstance(start, Array):
+        start = start.compute()
+
+    if isinstance(stop, Array):
+        stop = stop.compute()
+
+    return np.linspace(start, stop, num, endpoint=endpoint, dtype=dtype)
 
 
 def astype(x, astype_dtype=None, **kwargs):
@@ -270,15 +280,21 @@ def astype(x, astype_dtype=None, **kwargs):
 
 def view(x, dtype, order="C"):
     if order == "C":
-        x = np.ascontiguousarray(x)
+        try:
+            x = np.ascontiguousarray(x, like=x)
+        except TypeError:
+            x = np.ascontiguousarray(x)
         return x.view(dtype)
     else:
-        x = np.asfortranarray(x)
+        try:
+            x = np.asfortranarray(x, like=x)
+        except TypeError:
+            x = np.asfortranarray(x)
         return x.T.view(dtype).T
 
 
 def slice_with_int_dask_array(x, idx, offset, x_size, axis):
-    """ Chunk function of `slice_with_int_dask_array_on_axis`.
+    """Chunk function of `slice_with_int_dask_array_on_axis`.
     Slice one chunk of x by one chunk of idx.
 
     Parameters
@@ -299,6 +315,10 @@ def slice_with_int_dask_array(x, idx, offset, x_size, axis):
     x sliced along axis, using only the elements of idx that fall inside the
     current chunk.
     """
+    from dask.array.utils import asarray_safe, meta_from_array
+
+    idx = asarray_safe(idx, like=meta_from_array(x))
+
     # Needed when idx is unsigned
     idx = idx.astype(np.int64)
 
@@ -320,7 +340,7 @@ def slice_with_int_dask_array(x, idx, offset, x_size, axis):
 
 
 def slice_with_int_dask_array_aggregate(idx, chunk_outputs, x_chunks, axis):
-    """ Final aggregation function of `slice_with_int_dask_array_on_axis`.
+    """Final aggregation function of `slice_with_int_dask_array_on_axis`.
     Aggregate all chunks of x by one chunk of idx, reordering the output of
     `slice_with_int_dask_array`.
 
@@ -373,3 +393,41 @@ def slice_with_int_dask_array_aggregate(idx, chunk_outputs, x_chunks, axis):
             idx_final if i == axis else slice(None) for i in range(chunk_outputs.ndim)
         )
     ]
+
+
+def getitem(obj, index):
+    """Getitem function
+
+    This function creates a copy of the desired selection for array-like
+    inputs when the selection is smaller than half of the original array. This
+    avoids excess memory usage when extracting a small portion from a large array.
+    For more information, see
+    https://numpy.org/doc/stable/reference/arrays.indexing.html#basic-slicing-and-indexing.
+
+    Parameters
+    ----------
+    obj: ndarray, string, tuple, list
+        Object to get item from.
+    index: int, list[int], slice()
+        Desired selection to extract from obj.
+
+    Returns
+    -------
+    Selection obj[index]
+
+    """
+    try:
+        result = obj[index]
+    except IndexError as e:
+        raise ValueError(
+            "Array chunk size or shape is unknown. "
+            "Possible solution with x.compute_chunk_sizes()"
+        ) from e
+
+    try:
+        if not result.flags.owndata and obj.size >= 2 * result.size:
+            result = result.copy()
+    except AttributeError:
+        pass
+
+    return result

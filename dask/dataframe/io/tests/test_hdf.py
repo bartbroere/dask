@@ -1,16 +1,26 @@
-import numpy as np
-import pandas as pd
-import pandas.util.testing as tm
-import pytest
+from __future__ import annotations
 
 import os
-from time import sleep
 import pathlib
+from time import sleep
+
+import numpy as np
+import pandas as pd
+import pytest
+from packaging.version import Version
 
 import dask
 import dask.dataframe as dd
-from dask.utils import tmpfile, tmpdir, dependency_depth
+from dask._compatibility import PY_VERSION
+from dask.dataframe._compat import tm
+from dask.dataframe.optimize import optimize_dataframe_getitem
 from dask.dataframe.utils import assert_eq
+from dask.layers import DataFrameIOLayer
+from dask.utils import dependency_depth, tmpdir, tmpfile
+
+# there's no support in upstream for writing HDF with extension dtypes yet.
+# see https://github.com/pandas-dev/pandas/issues/31199
+pytestmark = pytest.mark.skip_with_pyarrow_strings  # no support for hdf yet
 
 
 def test_to_hdf():
@@ -44,6 +54,10 @@ def test_to_hdf():
         tm.assert_frame_equal(df, out[:])
 
 
+@pytest.mark.skipif(
+    PY_VERSION >= Version("3.11"),
+    reason="segfaults due to https://github.com/PyTables/PyTables/issues/977",
+)
 def test_to_hdf_multiple_nodes():
     pytest.importorskip("tables")
     df = pd.DataFrame(
@@ -120,8 +134,18 @@ def test_to_hdf_multiple_nodes():
     with tmpfile("h5") as fn:
         with pd.HDFStore(fn) as hdf:
             b.to_hdf(hdf, "/data*")
-            out = dd.read_hdf(fn, "/data*")
-            assert_eq(df16, out)
+        out = dd.read_hdf(fn, "/data*")
+        assert_eq(df16, out)
+
+    # Test getitem optimization
+    with tmpfile("h5") as fn:
+        a.to_hdf(fn, "/data*")
+        out = dd.read_hdf(fn, "/data*")[["x"]]
+        dsk = optimize_dataframe_getitem(out.dask, keys=out.__dask_keys__())
+        read = [key for key in dsk.layers if key.startswith("read-hdf")][0]
+        subgraph = dsk.layers[read]
+        assert isinstance(subgraph, DataFrameIOLayer)
+        assert subgraph.columns == ["x"]
 
 
 def test_to_hdf_multiple_files():
@@ -187,6 +211,16 @@ def test_to_hdf_multiple_files():
         out = dd.read_hdf(fn, "/data")
         assert_eq(df16, out)
 
+    # saving to multiple files where first file is longer
+    # https://github.com/dask/dask/issues/8023
+    with tmpdir() as dn:
+        fn1 = os.path.join(dn, "data_1.h5")
+        fn2 = os.path.join(dn, "data_2.h5")
+        b.to_hdf(fn1, "/data")
+        a.to_hdf(fn2, "/data")
+        out = dd.read_hdf([fn1, fn2], "/data")
+        assert_eq(pd.concat([df16, df]), out)
+
     # saving to multiple files with custom name_function
     with tmpdir() as dn:
         fn = os.path.join(dn, "data_*.h5")
@@ -203,8 +237,8 @@ def test_to_hdf_multiple_files():
     with tmpfile("h5") as fn:
         with pd.HDFStore(fn) as hdf:
             a.to_hdf(hdf, "/data*")
-            out = dd.read_hdf(fn, "/data*")
-            assert_eq(df, out)
+        out = dd.read_hdf(fn, "/data*")
+        assert_eq(df, out)
 
 
 def test_to_hdf_modes_multiple_nodes():
@@ -219,7 +253,7 @@ def test_to_hdf_modes_multiple_nodes():
         a.to_hdf(fn, "/data2")
         a.to_hdf(fn, "/data*", mode="a")
         out = dd.read_hdf(fn, "/data*")
-        assert_eq(df.append(df), out)
+        assert_eq(dd.concat([df, df]), out)
 
     # overwriting a file with a single partition
     a = dd.from_pandas(df, 1)
@@ -235,7 +269,7 @@ def test_to_hdf_modes_multiple_nodes():
         a.to_hdf(fn, "/data2")
         a.to_hdf(fn, "/data*", mode="a")
         out = dd.read_hdf(fn, "/data*")
-        assert_eq(df.append(df), out)
+        assert_eq(dd.concat([df, df]), out)
 
     # overwriting a file with two partitions
     a = dd.from_pandas(df, 2)
@@ -252,7 +286,7 @@ def test_to_hdf_modes_multiple_nodes():
         a.to_hdf(fn, "/data2")
         a.to_hdf(fn, "/data*", mode="a", append=False)
         out = dd.read_hdf(fn, "/data*")
-        assert_eq(df.append(df), out)
+        assert_eq(dd.concat([df, df]), out)
 
 
 def test_to_hdf_modes_multiple_files():
@@ -268,7 +302,7 @@ def test_to_hdf_modes_multiple_files():
         a.to_hdf(os.path.join(dn, "data2"), "/data")
         a.to_hdf(fn, "/data", mode="a")
         out = dd.read_hdf(fn, "/data*")
-        assert_eq(df.append(df), out)
+        assert_eq(dd.concat([df, df]), out)
 
     # appending two partitions to existing data
     a = dd.from_pandas(df, 2)
@@ -277,7 +311,7 @@ def test_to_hdf_modes_multiple_files():
         a.to_hdf(os.path.join(dn, "data2"), "/data")
         a.to_hdf(fn, "/data", mode="a")
         out = dd.read_hdf(fn, "/data")
-        assert_eq(df.append(df), out)
+        assert_eq(dd.concat([df, df]), out)
 
     # overwriting a file with two partitions
     a = dd.from_pandas(df, 2)
@@ -295,7 +329,7 @@ def test_to_hdf_modes_multiple_files():
         a.to_hdf(os.path.join(dn, "data1"), "/data")
         a.to_hdf(fn, "/data", mode="a", append=False)
         out = dd.read_hdf(fn, "/data")
-        assert_eq(df.append(df), out)
+        assert_eq(dd.concat([df, df]), out)
 
 
 def test_to_hdf_link_optimizations():
@@ -366,6 +400,10 @@ def test_to_hdf_link_optimizations():
         assert dependency_depth(d.dask) == 2 + a.npartitions
 
 
+@pytest.mark.skipif(
+    PY_VERSION >= Version("3.11"),
+    reason="segfaults due to https://github.com/PyTables/PyTables/issues/977",
+)
 @pytest.mark.slow
 def test_to_hdf_lock_delays():
     pytest.importorskip("tables")
@@ -412,11 +450,11 @@ def test_to_hdf_lock_delays():
     )
     a = dd.from_pandas(df16, 16)
 
-    # adding artifichial delays to make sure last tasks finish first
+    # adding artificial delays to make sure last tasks finish first
     # that's a way to simulate last tasks finishing last
     def delayed_nop(i):
-        if i[1] < 10:
-            sleep(0.1 * (10 - i[1]))
+        if i.iloc[1] < 10:
+            sleep(0.1 * (10 - i.iloc[1]))
         return i
 
     # saving to multiple hdf nodes
@@ -427,7 +465,7 @@ def test_to_hdf_lock_delays():
         assert_eq(df16, out)
 
     # saving to multiple hdf files
-    # adding artifichial delays to make sure last tasks finish first
+    # adding artificial delays to make sure last tasks finish first
     with tmpdir() as dn:
         fn = os.path.join(dn, "data*")
         a = a.apply(delayed_nop, axis=1, meta=a)
@@ -456,6 +494,10 @@ def test_to_hdf_exceptions():
                 a.to_hdf(hdf, "/data_*_*")
 
 
+@pytest.mark.skipif(
+    PY_VERSION >= Version("3.11"),
+    reason="segfaults due to https://github.com/PyTables/PyTables/issues/977",
+)
 @pytest.mark.parametrize("scheduler", ["sync", "threads", "processes"])
 @pytest.mark.parametrize("npartitions", [1, 4, 10])
 def test_to_hdf_schedulers(scheduler, npartitions):
@@ -586,14 +628,14 @@ def test_to_fmt_warns():
 
     # testing warning when breaking order
     with tmpfile("h5") as fn:
-        with pytest.warns(None):
+        with pytest.warns(
+            UserWarning, match="To preserve order between partitions name_function"
+        ):
             a.to_hdf(fn, "/data*", name_function=str)
 
-    # testing warning when breaking order
     with tmpdir() as dn:
-        with pytest.warns(None):
-            fn = os.path.join(dn, "data_*.csv")
-            a.to_csv(fn, name_function=str)
+        fn = os.path.join(dn, "data_*.csv")
+        a.to_csv(fn, name_function=str)
 
 
 @pytest.mark.parametrize(
@@ -657,6 +699,10 @@ def test_read_hdf_multiply_open():
             dd.read_hdf(fn, "/data", chunksize=2, mode="r")
 
 
+@pytest.mark.skipif(
+    PY_VERSION >= Version("3.11"),
+    reason="segfaults due to https://github.com/PyTables/PyTables/issues/977",
+)
 def test_read_hdf_multiple():
     pytest.importorskip("tables")
     df = pd.DataFrame(
@@ -829,3 +875,70 @@ def test_hdf_filenames():
     assert ddf.to_hdf("foo*.hdf5", "key") == ["foo0.hdf5", "foo1.hdf5"]
     os.remove("foo0.hdf5")
     os.remove("foo1.hdf5")
+
+
+def test_hdf_path_exceptions():
+    # single file doesn't exist
+    with pytest.raises(IOError):
+        dd.read_hdf("nonexistant_store_X34HJK", "/tmp")
+
+    # a file from a list of files doesn't exist
+    with pytest.raises(IOError):
+        dd.read_hdf(["nonexistant_store_X34HJK", "nonexistant_store_UY56YH"], "/tmp")
+
+    # list of files is empty
+    with pytest.raises(ValueError):
+        dd.read_hdf([], "/tmp")
+
+
+def test_hdf_nonpandas_keys():
+    # https://github.com/dask/dask/issues/5934
+    # TODO: maybe remove this if/when pandas copes with all keys
+
+    tables = pytest.importorskip("tables")
+    import tables
+
+    class Table1(tables.IsDescription):
+        value1 = tables.Float32Col()
+
+    class Table2(tables.IsDescription):
+        value2 = tables.Float32Col()
+
+    class Table3(tables.IsDescription):
+        value3 = tables.Float32Col()
+
+    with tmpfile("h5") as path:
+        with tables.open_file(path, mode="a") as h5file:
+            group = h5file.create_group("/", "group")
+            t = h5file.create_table(group, "table1", Table1, "Table 1")
+            row = t.row
+            row["value1"] = 1
+            row.append()
+            t = h5file.create_table(group, "table2", Table2, "Table 2")
+            row = t.row
+            row["value2"] = 1
+            row.append()
+            t = h5file.create_table(group, "table3", Table3, "Table 3")
+            row = t.row
+            row["value3"] = 1
+            row.append()
+
+        # pandas keys should still work
+        bar = pd.DataFrame(np.random.randn(10, 4))
+        bar.to_hdf(path, "/bar", format="table", mode="a")
+
+        dd.read_hdf(path, "/group/table1")
+        dd.read_hdf(path, "/group/table2")
+        dd.read_hdf(path, "/group/table3")
+        dd.read_hdf(path, "/bar")
+
+
+def test_hdf_empty_dataframe(tmp_path):
+    pytest.importorskip("tables")
+    # https://github.com/dask/dask/issues/8707
+    from dask.dataframe.io.hdf import dont_use_fixed_error_message
+
+    df = pd.DataFrame({"A": [], "B": []}, index=[])
+    df.to_hdf(tmp_path / "data.h5", format="fixed", key="df", mode="w")
+    with pytest.raises(TypeError, match=dont_use_fixed_error_message):
+        dd.read_hdf(tmp_path / "data.h5", "df")

@@ -6,10 +6,11 @@ Some differences
 - We don't handle missing values at all
 
 """
+from __future__ import annotations
+
 # This is lightly adapted from scipy.stats 0.19
 # https://github.com/scipy/scipy/blob/v0.19.0/scipy/stats/stats.py
 # The original copyright notice follows:
-
 # Copyright 2002 Gary Strangman.  All rights reserved
 # Copyright 2002-2016 The SciPy Developers
 #
@@ -28,30 +29,42 @@ Some differences
 # out of the use of this software, even if advised of the possibility of
 # such damage.
 import math
+from collections import namedtuple
 
 import numpy as np
+
 import dask.array as da
-from dask.array.random import doc_wraps
-from dask.array.ufunc import wrap_elemwise
 from dask import delayed
+from dask.array.ufunc import wrap_elemwise
+from dask.utils import derived_from
 
 try:
     import scipy.stats
-except ImportError:
-    raise ImportError("`dask.array.stats` requires `scipy` to be installed.")
-from scipy.stats import distributions
+except ImportError as e:
+    raise ImportError("`dask.array.stats` requires `scipy` to be installed.") from e
 from scipy import special
-from scipy.stats.stats import (
-    Ttest_indResult,
-    Ttest_1sampResult,
-    Ttest_relResult,
-    Power_divergenceResult,
-    NormaltestResult,
-    SkewtestResult,
-    KurtosistestResult,
-    F_onewayResult,
-)
+from scipy.stats import distributions
 
+# copied from https://github.com/scipy/scipy/blob/v1.8.0/scipy/stats/_stats_py.py since
+# these are all private after v1.8.0
+F_onewayResult = namedtuple("F_onewayResult", ("statistic", "pvalue"))
+KurtosistestResult = namedtuple("KurtosistestResult", ("statistic", "pvalue"))
+NormaltestResult = namedtuple("NormaltestResult", ("statistic", "pvalue"))
+Power_divergenceResult = namedtuple("Power_divergenceResult", ("statistic", "pvalue"))
+SkewtestResult = namedtuple("SkewtestResult", ("statistic", "pvalue"))
+Ttest_1sampResult = namedtuple("Ttest_1sampResult", ("statistic", "pvalue"))
+Ttest_indResult = namedtuple("Ttest_indResult", ("statistic", "pvalue"))
+Ttest_relResult = namedtuple("Ttest_relResult", ("statistic", "pvalue"))
+
+# Map from names to lambda_ values used in power_divergence().
+_power_div_lambda_names = {
+    "pearson": 1,
+    "log-likelihood": 0,
+    "freeman-tukey": -0.5,
+    "mod-log-likelihood": -1,
+    "neyman": -2,
+    "cressie-read": 2 / 3,
+}
 
 __all__ = [
     "ttest_ind",
@@ -73,7 +86,7 @@ __all__ = [
 # -----------------
 
 
-@doc_wraps(scipy.stats.ttest_ind)
+@derived_from(scipy.stats)
 def ttest_ind(a, b, axis=0, equal_var=True):
     v1 = da.var(a, axis, ddof=1)  # XXX: np -> da
     v2 = da.var(b, axis, ddof=1)  # XXX: np -> da
@@ -90,7 +103,7 @@ def ttest_ind(a, b, axis=0, equal_var=True):
     return delayed(Ttest_indResult, nout=2)(*res)
 
 
-@doc_wraps(scipy.stats.ttest_1samp)
+@derived_from(scipy.stats)
 def ttest_1samp(a, popmean, axis=0, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -109,7 +122,7 @@ def ttest_1samp(a, popmean, axis=0, nan_policy="propagate"):
     return delayed(Ttest_1sampResult, nout=2)(t, prob)
 
 
-@doc_wraps(scipy.stats.ttest_rel)
+@derived_from(scipy.stats)
 def ttest_rel(a, b, axis=0, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -131,23 +144,61 @@ def ttest_rel(a, b, axis=0, nan_policy="propagate"):
     return delayed(Ttest_relResult, nout=2)(t, prob)
 
 
-@doc_wraps(scipy.stats.chisquare)
 def chisquare(f_obs, f_exp=None, ddof=0, axis=0):
+    """Calculate a one-way chi-square test.
+
+    Please see the docstring for :py:func:`scipy.stats.chisquare` for
+    complete information including notes, references, and examples.
+
+    Some inconsistencies with the Dask version may exist.
+
+    The chi-square test tests the null hypothesis that the categorical
+    data has the given frequencies.
+
+    Parameters
+    ----------
+    f_obs : array_like
+        Observed frequencies in each category.
+    f_exp : array_like, optional
+        Expected frequencies in each category.  By default the categories are
+        assumed to be equally likely.
+    ddof : int, optional
+        "Delta degrees of freedom": adjustment to the degrees of freedom
+        for the p-value.  The p-value is computed using a chi-squared
+        distribution with ``k - 1 - ddof`` degrees of freedom, where `k`
+        is the number of observed frequencies.  The default value of `ddof`
+        is 0.
+    axis : int or None, optional
+        The axis of the broadcast result of `f_obs` and `f_exp` along which to
+        apply the test.  If axis is None, all values in `f_obs` are treated
+        as a single data set.  Default is 0.
+
+    Returns
+    -------
+    res: Delayed Power_divergenceResult
+        An object containing attributes:
+
+        chisq : float or ndarray
+            The chi-squared test statistic.  The value is a float if `axis` is
+            None or `f_obs` and `f_exp` are 1-D.
+        pvalue : float or ndarray
+            The p-value of the test.  The value is a float if `ddof` and the
+            return value `chisq` are scalars.
+
+    """
     return power_divergence(f_obs, f_exp=f_exp, ddof=ddof, axis=axis, lambda_="pearson")
 
 
-@doc_wraps(scipy.stats.power_divergence)
+@derived_from(scipy.stats)
 def power_divergence(f_obs, f_exp=None, ddof=0, axis=0, lambda_=None):
-
     if isinstance(lambda_, str):
-        # TODO: public api
-        if lambda_ not in scipy.stats.stats._power_div_lambda_names:
-            names = repr(list(scipy.stats.stats._power_div_lambda_names.keys()))[1:-1]
+        if lambda_ not in _power_div_lambda_names:
+            names = repr(list(_power_div_lambda_names.keys()))[1:-1]
             raise ValueError(
-                "invalid string for lambda_: {0!r}.  Valid strings "
-                "are {1}".format(lambda_, names)
+                f"invalid string for lambda_: {lambda_!r}. "
+                f"Valid strings are {names}"
             )
-        lambda_ = scipy.stats.stats._power_div_lambda_names[lambda_]
+        lambda_ = _power_div_lambda_names[lambda_]
     elif lambda_ is None:
         lambda_ = 1
 
@@ -183,7 +234,7 @@ def power_divergence(f_obs, f_exp=None, ddof=0, axis=0, lambda_=None):
     return delayed(Power_divergenceResult, nout=2)(stat, p)
 
 
-@doc_wraps(scipy.stats.skew)
+@derived_from(scipy.stats)
 def skew(a, axis=0, bias=True, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -194,7 +245,7 @@ def skew(a, axis=0, bias=True, nan_policy="propagate"):
     m2 = moment(a, 2, axis)
     m3 = moment(a, 3, axis)
     zero = m2 == 0
-    vals = da.where(~zero, m3 / m2 ** 1.5, 0.0)
+    vals = da.where(~zero, m3 / m2**1.5, 0.0)
     # vals = da.where(~zero, (m2, m3),
     #                 lambda m2, m3: m3 / m2**1.5,
     #                 0.)
@@ -203,14 +254,13 @@ def skew(a, axis=0, bias=True, nan_policy="propagate"):
         raise NotImplementedError("bias=False is not implemented.")
 
     if vals.ndim == 0:
-        return vals
-        # TODO: scalar
-        # return vals.item()
+        # TODO: scalar, min is a workaround
+        return vals.min()
 
     return vals
 
 
-@doc_wraps(scipy.stats.skewtest)
+@derived_from(scipy.stats)
 def skewtest(a, axis=0, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -227,7 +277,7 @@ def skewtest(a, axis=0, nan_policy="propagate"):
     y = b2 * math.sqrt(((n + 1) * (n + 3)) / (6.0 * (n - 2)))
     beta2 = (
         3.0
-        * (n ** 2 + 27 * n - 70)
+        * (n**2 + 27 * n - 70)
         * (n + 1)
         * (n + 3)
         / ((n - 2.0) * (n + 5) * (n + 7) * (n + 9))
@@ -241,7 +291,7 @@ def skewtest(a, axis=0, nan_policy="propagate"):
     return delayed(SkewtestResult, nout=2)(Z, 2 * distributions.norm.sf(np.abs(Z)))
 
 
-@doc_wraps(scipy.stats.kurtosis)
+@derived_from(scipy.stats)
 def kurtosis(a, axis=0, fisher=True, bias=True, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -253,7 +303,7 @@ def kurtosis(a, axis=0, fisher=True, bias=True, nan_policy="propagate"):
     zero = m2 == 0
     olderr = np.seterr(all="ignore")
     try:
-        vals = da.where(zero, 0, m4 / m2 ** 2.0)
+        vals = da.where(zero, 0, m4 / m2**2.0)
     finally:
         np.seterr(**olderr)
 
@@ -264,11 +314,14 @@ def kurtosis(a, axis=0, fisher=True, bias=True, nan_policy="propagate"):
     if fisher:
         return vals - 3
     else:
+        if vals.ndim == 0:
+            # TODO: scalar, min is a workaround
+            return vals.min()
+
         return vals
-        # TODO: scalar; vals = vals.item()  # array scalar
 
 
-@doc_wraps(scipy.stats.kurtosistest)
+@derived_from(scipy.stats)
 def kurtosistest(a, axis=0, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -291,7 +344,7 @@ def kurtosistest(a, axis=0, nan_policy="propagate"):
         * np.sqrt((6.0 * (n + 3) * (n + 5)) / (n * (n - 2) * (n - 3)))
     )
     # [1]_ Eq. 3:
-    A = 6.0 + 8.0 / sqrtbeta1 * (2.0 / sqrtbeta1 + np.sqrt(1 + 4.0 / (sqrtbeta1 ** 2)))
+    A = 6.0 + 8.0 / sqrtbeta1 * (2.0 / sqrtbeta1 + np.sqrt(1 + 4.0 / (sqrtbeta1**2)))
     term1 = 1 - 2 / (9.0 * A)
     denom = 1 + x * np.sqrt(2 / (A - 4.0))
     denom = np.where(denom < 0, 99, denom)
@@ -305,7 +358,7 @@ def kurtosistest(a, axis=0, nan_policy="propagate"):
     return delayed(KurtosistestResult, nout=2)(Z, 2 * distributions.norm.sf(np.abs(Z)))
 
 
-@doc_wraps(scipy.stats.normaltest)
+@derived_from(scipy.stats)
 def normaltest(a, axis=0, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -318,7 +371,7 @@ def normaltest(a, axis=0, nan_policy="propagate"):
     return delayed(NormaltestResult, nout=2)(k2, delayed(distributions.chi2.sf)(k2, 2))
 
 
-@doc_wraps(scipy.stats.f_oneway)
+@derived_from(scipy.stats)
 def f_oneway(*args):
     # args = [np.asarray(arg, dtype=float) for arg in args]
     # ANOVA on N groups, each in its own array
@@ -353,7 +406,7 @@ def f_oneway(*args):
     return delayed(F_onewayResult, nout=2)(f, prob)
 
 
-@doc_wraps(scipy.stats.moment)
+@derived_from(scipy.stats)
 def moment(a, moment=1, axis=0, nan_policy="propagate"):
     if nan_policy != "propagate":
         raise NotImplementedError(
@@ -367,9 +420,8 @@ def moment(a, moment=1, axis=0, nan_policy="propagate"):
 # -------
 # Don't really want to do all of scipy.special (or do we?)
 
-
-_xlogy = wrap_elemwise(special.xlogy)
-_fdtrc = wrap_elemwise(special.fdtrc)
+_xlogy = wrap_elemwise(special.xlogy, source=special)
+_fdtrc = wrap_elemwise(special.fdtrc, source=special)
 
 
 def _equal_var_ttest_denom(v1, n1, v2, n2):
@@ -383,7 +435,7 @@ def _unequal_var_ttest_denom(v1, n1, v2, n2):
     vn1 = v1 / n1
     vn2 = v2 / n2
     with np.errstate(divide="ignore", invalid="ignore"):
-        df = (vn1 + vn2) ** 2 / (vn1 ** 2 / (n1 - 1) + vn2 ** 2 / (n2 - 1))
+        df = (vn1 + vn2) ** 2 / (vn1**2 / (n1 - 1) + vn2**2 / (n2 - 1))
 
     # If df is undefined, variances are zero (assumes n1 > 0 & n2 > 0).
     # Hence it doesn't matter what df is as long as it's not NaN.
@@ -393,7 +445,6 @@ def _unequal_var_ttest_denom(v1, n1, v2, n2):
 
 
 def _ttest_ind_from_stats(mean1, mean2, denom, df):
-
     d = mean1 - mean2
     with np.errstate(divide="ignore", invalid="ignore"):
         t = da.divide(d, denom)

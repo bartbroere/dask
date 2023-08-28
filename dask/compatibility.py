@@ -1,22 +1,14 @@
-import sys
-from distutils.version import LooseVersion
+from __future__ import annotations
 
-# TODO: remove this import once dask requires distributed > 2.3.2
-from .utils import apply  # noqa
+import warnings
 
-# TODO: remove this once dask requires distributed >= 2.2.0
-unicode = str  # noqa
+from dask._compatibility import EMSCRIPTEN as _EMSCRIPTEN  # noqa
+from dask._compatibility import PY_VERSION as _PY_VERSION  # noqa
+from dask._compatibility import entry_points, parse_version  # noqa
 
-try:
-    from dataclasses import is_dataclass, fields as dataclass_fields
-
-except ImportError:
-
-    def is_dataclass(x):
-        return False
-
-    def dataclass_fields(x):
-        return []
-
-
-PY_VERSION = LooseVersion(".".join(map(str, sys.version_info[:3])))
+warnings.warn(
+    "`dask.compatibility` is not intended for external use and has been renamed to `dask._compatibility`. "
+    "This backward-compatible shim will be removed in a future release. Please find an alternative.",
+    DeprecationWarning,
+    stacklevel=2,
+)

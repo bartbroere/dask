@@ -1,16 +1,13 @@
 Futures
 =======
 
+.. meta::
+    :description: Dask futures reimplements the Python futures API so you can scale your Python futures workflow across a Dask cluster.
+
 Dask supports a real-time task framework that extends Python's
 `concurrent.futures <https://docs.python.org/3/library/concurrent.futures.html>`_
-interface.  This interface is good for arbitrary task scheduling like
-:doc:`dask.delayed <delayed>`, but is immediate rather than lazy, which
-provides some more flexibility in situations where the computations may evolve
-over time.
-
-These features depend on the second generation task scheduler found in
-`dask.distributed <https://distributed.dask.org/en/latest>`_ (which,
-despite its name, runs very well on a single machine).
+interface. Dask futures allow you to scale generic Python workflows across
+a Dask cluster with minimal code changes.
 
 .. raw:: html
 
@@ -23,6 +20,20 @@ despite its name, runs very well on a single machine).
            allowfullscreen></iframe>
 
 .. currentmodule:: distributed
+
+This interface is good for arbitrary task scheduling like
+:doc:`dask.delayed <delayed>`, but is immediate rather than lazy, which
+provides some more flexibility in situations where the computations may evolve
+over time. These features depend on the second generation task scheduler found in
+`dask.distributed <https://distributed.dask.org/en/latest>`_ (which,
+despite its name, runs very well on a single machine).
+
+
+Examples
+--------
+
+Visit https://examples.dask.org/futures.html to see and run examples
+using futures with Dask.
 
 Start Dask Client
 -----------------
@@ -38,8 +49,8 @@ among the various worker processes or threads:
    # or
    client = Client(processes=False)  # start local workers as threads
 
-If you have `Bokeh <https://bokeh.pydata.org>`_ installed, then this starts up a
-diagnostic dashboard at http://localhost:8787 .
+If you have `Bokeh <https://docs.bokeh.org>`_ installed, then this starts up a
+diagnostic dashboard at ``http://localhost:8787`` .
 
 Submit Tasks
 ------------
@@ -101,6 +112,9 @@ function and many inputs:
 However, note that each task comes with about 1ms of overhead.  If you want to
 map a function over a large number of inputs, then you might consider
 :doc:`dask.bag <bag>` or :doc:`dask.dataframe <dataframe>` instead.
+
+.. note: See `this page <https://docs.dask.org/en/latest/graphs.html>`_ for
+   restrictions on what functions you use with Dask.
 
 Move Data
 ---------
@@ -280,6 +294,8 @@ Additionally, for iterative algorithms, you can add more futures into the
            new_future = client.submit(...)
            seq.add(new_future)  # add back into the loop
 
+or use ``seq.update(futures)`` to add multiple futures at once.
+
 
 Fire and Forget
 ---------------
@@ -431,6 +447,8 @@ Coordination Primitives
    Queue
    Variable
    Lock
+   Event
+   Semaphore
    Pub
    Sub
 
@@ -440,11 +458,21 @@ Sometimes situations arise where tasks, workers, or clients need to coordinate
 with each other in ways beyond normal task scheduling with futures.  In these
 cases Dask provides additional primitives to help in complex situations.
 
-Dask provides distributed versions of coordination primitives like locks,
+Dask provides distributed versions of coordination primitives like locks, events,
 queues, global variables, and pub-sub systems that, where appropriate, match
 their in-memory counterparts.  These can be used to control access to external
 resources, track progress of ongoing computations, or share data in
 side-channels between many workers, clients, and tasks sensibly.
+
+.. raw:: html
+
+   <iframe width="560"
+           height="315"
+           src="https://www.youtube.com/embed/Q-Y3BR1u7c0"
+           style="margin: 0 auto 20px auto; display: block;"
+           frameborder="0"
+           allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
+           allowfullscreen></iframe>
 
 These features are rarely necessary for common use of Dask.  We recommend that
 beginning users stick with using the simpler futures found above (like
@@ -604,6 +632,88 @@ This can be useful if you want to control concurrent access to some external
 resource like a database or un-thread-safe library.
 
 
+Events
+~~~~~~
+
+.. autosummary::
+   Event
+
+Dask Events mimic ``asyncio.Event`` objects, but on a cluster scope.
+They hold a single flag which can be set or cleared.
+Clients can wait until the event flag is set.
+Different from a ``Lock``, every client can set or clear the flag and there
+is no "ownership" of an event.
+
+You can use events to e.g. synchronize multiple clients:
+
+.. code-block:: python
+
+   # One one client
+   from dask.distributed import Event
+
+   event = Event("my-event-1")
+   event.wait()
+
+The call to wait will block until the event is set, e.g. in another client
+
+.. code-block:: python
+
+   # In another client
+   from dask.distributed import Event
+
+   event = Event("my-event-1")
+
+   # do some work
+
+   event.set()
+
+Events can be set, cleared and waited on multiple times.
+Every waiter referencing the same event name will be notified on event set
+(and not only the first one as in the case of a lock):
+
+.. code-block:: python
+
+   from dask.distributed import Event
+
+   def wait_for_event(x):
+      event = Event("my-event")
+
+      event.wait()
+      # at this point, all function calls
+      # are in sync once the event is set
+
+   futures = client.map(wait_for_event, range(10))
+
+   Event("my-event").set()
+   client.gather(futures)
+
+
+Semaphore
+~~~~~~~~~
+
+.. autosummary::
+   Semaphore
+
+Similar to the single-valued ``Lock`` it is also possible to use a cluster-wide
+semaphore to coordinate and limit access to a sensitive resource like a
+database.
+
+.. code-block:: python
+
+   from dask.distributed import Semaphore
+
+   sem = Semaphore(max_leases=2, name="database")
+
+   def access_limited(val, sem):
+      with sem:
+         # Interact with the DB
+         return
+
+   futures = client.map(access_limited, range(10), sem=sem)
+   client.gather(futures)
+   sem.close()
+
+
 Publish-Subscribe
 ~~~~~~~~~~~~~~~~~
 
@@ -614,14 +724,9 @@ Publish-Subscribe
 Dask implements the `Publish Subscribe pattern <https://en.wikipedia.org/wiki/Publish%E2%80%93subscribe_pattern>`_,
 providing an additional channel of communication between ongoing tasks.
 
-.. autoclass:: Pub
-   :members:
 
 Actors
 ------
-
-.. note:: This is an advanced feature and is rarely necessary in the common case.
-.. note:: This is an experimental feature and is subject to change without notice.
 
 Actors allow workers to manage rapidly changing state without coordinating with
 the central scheduler.  This has the advantage of reducing latency
@@ -688,6 +793,17 @@ Attribute access is synchronous and blocking:
 Example: Parameter Server
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
+This example will perform the following minimization with a parameter server:
+
+.. math::
+
+   \min_{p\in\mathbb{R}^{1000}} \sum_{i=1}^{1000} (p_i - 1)^2
+
+This is a simple minimization that will serve as an illustrative example.
+
+The Dask Actor will serve as the parameter server that will hold the model.
+The client will calculate the gradient of the loss function above.
+
 .. code-block:: python
 
    import numpy as np
@@ -705,16 +821,26 @@ Example: Parameter Server
        def get(self, key):
            return self.data[key]
 
+   def train(params, lr=0.1):
+       grad = 2 * (params - 1)  # gradient of (params - 1)**2
+       new_params = params - lr * grad
+       return new_params
+
    ps_future = client.submit(ParameterServer, actor=True)
    ps = ps_future.result()
 
-   ps.put('parameters', np.random.random(1000))
+   ps.put('parameters', np.random.default_rng().random(1000))
+   for k in range(20):
+       params = ps.get('parameters').result()
+       new_params = train(params)
+       ps.put('parameters', new_params)
+       print(new_params.mean())
+       # k=0: "0.5988202981316124"
+       # k=10: "0.9569236575164062"
 
-   def train(batch, ps):
-       params = ps.get('parameters')
-
-   for batch in batches:
-
+This example works, and the loss function is minimized. The (simple) equation
+above is minimize, so each :math:`p_i` converges to 1. If desired, this example
+could be adapted to machine learning with a more complex function to minimize.
 
 Asynchronous Operation
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -732,6 +858,12 @@ All operations that require talking to the remote worker are awaitable:
 
        n = await counter.n  # attribute access also must be awaited
 
+Generally, all I/O operations that trigger computations (e.g. ``to_parquet``) should be done using the ``compute=False``
+parameter to avoid asynchronous blocking:
+
+.. code-block:: python
+
+   await client.compute(ddf.to_parquet('/tmp/some.parquet', compute=False))
 
 API
 ---
@@ -761,9 +893,6 @@ API
    Client.scatter
    Client.shutdown
    Client.scheduler_info
-   Client.shutdown
-   Client.start_ipython_workers
-   Client.start_ipython_scheduler
    Client.submit
    Client.unpublish_dataset
    Client.upload_file
@@ -811,6 +940,12 @@ API
    :members:
 
 .. autoclass:: Lock
+   :members:
+
+.. autoclass:: Event
+   :members:
+
+.. autoclass:: Semaphore
    :members:
 
 .. autoclass:: Pub
